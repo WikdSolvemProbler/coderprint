@@ -20,7 +20,11 @@ import { PALETTE, PANEL_SVG, PIXEL, cardsJson, spotifySvg } from './fixtures.js'
 
 const RULES_DARK =
   '.container{background:transparent!important}' +
-  `.artist{color:${PALETTE.dark.text}!important}.song{color:${PALETTE.dark.muted}!important}`;
+  `.artist{color:${PALETTE.dark.text}!important}.song{color:${PALETTE.dark.muted}!important}` +
+  '#bars{position:static!important;display:flex!important;align-items:flex-end;gap:1px;' +
+  'width:auto!important;height:22px!important;margin:-22px 0 0!important;overflow:hidden}' +
+  '.bar{position:static!important;flex:0 0 3px;opacity:1!important;animation-name:cpbar!important}' +
+  '@keyframes cpbar{from{height:3px}to{height:22px}}';
 
 function withinMs(limit, run) {
   const start = performance.now();

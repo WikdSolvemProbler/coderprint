@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { afterEach, beforeEach, describe, it } from 'node:test';
 
 import handler from '../api/card.js';
-import { DEFAULT_PALETTES, spotifyUrl, svgInner } from '../lib/compose.js';
+import { BAR_RULES, DEFAULT_PALETTES, spotifyUrl, svgInner } from '../lib/compose.js';
 import { PALETTE, PANEL_SVG, cardsJson, spotifySvg } from './fixtures.js';
 
 const USER = 'WikdSolvemProbler';
@@ -185,7 +185,7 @@ describe('the card', () => {
     const svg = await expectCard(await get(`user=${USER}&mode=dark`));
     assert.ok(svg.includes(`<rect width="896" height="445" rx="10" fill="${PALETTE.dark.bg}"/>`));
     assert.ok(svg.includes(`stroke="${PALETTE.dark.line}"`));
-    assert.ok(svg.includes(`.artist{color:${PALETTE.dark.text}!important}.song{color:${PALETTE.dark.muted}!important}</style>`));
+    assert.ok(svg.includes(`.artist{color:${PALETTE.dark.text}!important}.song{color:${PALETTE.dark.muted}!important}${BAR_RULES}</style>`));
     assert.ok(svg.includes('<div class="artist">Mura Masa</div>'));
     assert.doesNotMatch(svg, /Nothing playing/);
   });
