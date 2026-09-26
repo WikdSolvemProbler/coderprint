@@ -10,15 +10,20 @@ Your code's fingerprint on your GitHub profile: how much you actually wrote, how
 
 ## What it shows
 
-- **New lines written** over the window you pick, with a bar for each slice of it.
-- **Commits** on every branch, **active days** and your **longest** and **current streak** (days with a commit, counted in your own time zone when your profile shows one, see below), and how many **languages** you wrote.
-- **The language mix over time.** Days before today run along a log scale, so last week gets room and last year still fits. Quiet stretches are veiled by how little evidence they rest on, and the mix eases across them instead of jumping. The stream flows into a column that is also the legend.
+- **New lines written** over the window you pick. Under the total, 52 bars split the chart's span: each slice's lines rise in green and its commits hang below in red, each scaled to its own peak, and the biggest bursts of work carry their own totals. The bars start on the day your real work did.
+- **Commits** on every branch, **active days** and your **longest** and **current streak** (days with a commit, counted in your own time zone when your profile shows one, see below), and how many **languages** you wrote. One green dot at a time hops along these rows, and each number lights as the dot reaches it.
+- **The language mix over time.** Days before today run along a log scale, so last week gets room and last year still fits. Quiet stretches are veiled by how little evidence they rest on, and the mix eases across them instead of jumping. The stream flows into a column that is also the legend: your eight biggest languages by name, the rest as Other.
+- **A red Pareto line** over the stream: the running share of every line in the chart, from 0% at its left edge to 100% today. It draws itself, fast where you wrote fast and slow across quiet time.
 - **Five themes** (Paper, Sepia and Sage for light mode, Oxblood and Ink for dark). Visitors get the one matching their mode, and the choice rotates daily.
 - **What you're playing on Spotify**, optionally, merged into the same card and recolored to match it.
+
+Motion only ever adds to a finished panel. A visitor whose device asks for reduced motion sees none of it, and a viewer that never starts animations still sees the whole panel. Screen readers get the numbers in words, and so does the image's alt text in your README.
 
 ## How it counts
 
 A file version counts once, the first time its exact content appears in any of your repositories or branches. Copies, moves, merges, branch landings and imports from one repository to another reuse content that already exists, so they add nothing. A commit that adds more than 500 new files is treated as bringing in an existing codebase and skipped, as are commits by bots. Vendored folders, generated output, lockfiles and data files never count. Commits dated in the future (a wrong clock) are left out.
+
+A file's language comes from its extension, and an extension coderprint does not know counts as Other. The chart names at most eight languages; the rest, and any language under 1% of the window's lines, are drawn as Other, so the legend lists only what can be seen. The languages count in the stats covers every language coderprint recognizes in your window, named on the chart or not, except Markdown, which is prose.
 
 Days are your own, if and only if your public profile already says where you are. coderprint reads two things any visitor can see: the local time GitHub shows on your profile, if you turned that on, and your profile's location, looked up in a table of cities built from [GeoNames](https://www.geonames.org). The time zone always wins; the location can only choose among the zones with that offset today, which decides daylight saving for past days. A location that could mean places in different zones, such as "Santa Clara" (California or Cuba), "USA" or "SF / NYC", is not guessed at: days then fall at your shown offset, fixed for every past day so its daylight saving is ignored, or with no time zone shown, in UTC. Nothing else is asked for, and the zone is never printed or written anywhere.
 
@@ -95,7 +100,6 @@ The relay serves the card at `/api/card` and nothing else: the `public` folder, 
 | `spotify-uid` | none | Shows what you're playing on Spotify. |
 | `relay` | none | Your relay's card address, to merge panel and Spotify into one image. |
 | `mark` | none | Your own watermark, drawn faintly behind the chart: SVG path data with straight segments only, filled even-odd, up to 48 KB. Pass it from a secret (`mark: ${{ secrets.CODERPRINT_MARK }}`) so the path data never sits in your repository. It is drawn into the panel as pixels, merged with the background, so like any picture what is drawn can still be seen and traced. |
-| `mark-turn` | `0` | Degrees to turn the watermark. |
 | `force` | `false` | Redraw even if fewer repositories are visible than last time. Otherwise the old panel is kept, since that usually means a deleted repository or a token that lost access. |
 | `commit` | `true` | Commit and push the panel and README when they change. |
 
@@ -105,7 +109,7 @@ Action logs on a public repository are public, so coderprint never prints or wri
 
 ## Credits
 
-The Spotify card is [kittinan/spotify-github-profile](https://github.com/kittinan/spotify-github-profile). The relay only recolors it to match your theme; everything it shows comes from that project.
+The Spotify card is [kittinan/spotify-github-profile](https://github.com/kittinan/spotify-github-profile) by [Kittinan](https://github.com/kittinan), under the MIT License. The relay only recolors it to match your theme; everything it shows comes from that project.
 
 The place table, `places.tsv.gz`, is [GeoNames](https://www.geonames.org) data, trimmed to names, populations and time zones, with names folded to plain lowercase and a few common alternative names added by `tools/build_places.py`, and is licensed, like that data, under [Creative Commons Attribution 4.0](https://creativecommons.org/licenses/by/4.0/). GeoNames provides the data as is, without warranty or any representation of accuracy, timeliness or completeness.
 

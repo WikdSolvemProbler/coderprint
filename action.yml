@@ -24,9 +24,6 @@ inputs:
   mark:
     description: Your watermark as SVG path data with straight segments only (M, L, H, V, Z), filled even-odd, up to 48 KB. Pass it from a secret (a repository secret named CODERPRINT_MARK, for example) so the path data never sits in your repository. It is drawn into the panel as pixels merged with the background; like any picture, what is drawn can still be seen and traced. Optional.
     default: ""
-  mark-turn:
-    description: Degrees to turn the watermark.
-    default: "0"
   force:
     description: Redraw even if fewer repositories are visible than last time (a deleted repository, or a token that lost access).
     default: "false"
@@ -46,7 +43,6 @@ runs:
         CARDS_SPOTIFY_UID: ${{ inputs.spotify-uid }}
         CARDS_RELAY: ${{ inputs.relay }}
         CARDS_MARK_DATA: ${{ inputs.mark }}
-        CARDS_MARK_TURN: ${{ inputs.mark-turn }}
         FORCE: ${{ inputs.force == 'true' && '1' || '' }}
         COMMIT: ${{ inputs.commit }}
       run: |
