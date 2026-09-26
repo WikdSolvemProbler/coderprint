@@ -366,7 +366,8 @@ def slot(work, owner, name):
 
 def collect(owner, repos, work):
     """Every counted file version as (time, language, new lines), oldest first, plus the times of human
-    commits and of skipped imports, over the whole history; the window is applied afterwards."""
+    commits and of skipped imports, over the whole history; the window is applied afterwards. A commit
+    held by more than one repository, as in a fork, a mirror or the relay's private copy, counts once."""
     all_commits, mismatched = [], 0
     for i, r in enumerate(repos):
         try:
@@ -378,8 +379,11 @@ def collect(owner, repos, work):
         all_commits += commits
         mismatched += bad
 
-    seen, events, commit_times, import_times = set(), [], [], []
+    seen, shas, events, commit_times, import_times = set(), set(), [], [], []
     for ts, idx, sha, bot, files in sorted(all_commits, key=lambda c: (c[0], c[1], c[2])):
+        if sha in shas:
+            continue
+        shas.add(sha)
         fresh = [f for f in files if f[1] != "D" and f[0] not in seen and not f[0].startswith("0000000")]
         if bot:  # a bot's content still counts as seen, so no later commit is credited with it
             seen.update(f[0] for f in fresh)
