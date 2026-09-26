@@ -1,0 +1,13 @@
+{
+  "name": "coderprint",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Relay that merges a GitHub profile panel and a live Spotify card into one themed SVG.",
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "test": "node --test \"test/*.test.js\""
+  }
+}

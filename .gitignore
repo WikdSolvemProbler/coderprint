@@ -1,0 +1,5 @@
+# Preview output holds whatever was playing when it ran.
+dev/out-*.svg
+node_modules/
+.vercel/
+dev/

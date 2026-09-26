@@ -1,0 +1,76 @@
+name: coderprint
+description: New lines written, commit activity and the language mix over time, across public and private repositories, drawn for your profile README.
+author: WikdSolvemProbler
+branding:
+  icon: activity
+  color: orange
+
+inputs:
+  token:
+    description: A token that can read every repository to count, ideally from your own read-only GitHub App (see the README).
+    required: true
+  owner:
+    description: The account to draw for.
+    default: ${{ github.repository_owner }}
+  window:
+    description: The span the panel covers, one of all, 10y, 5y, 3y, 2y, 12m.
+    default: all
+  spotify-uid:
+    description: Your id from the Spotify widget (spotify-github-profile.kittinanx.com), to show what you are playing beside the panel. Optional.
+    default: ""
+  relay:
+    description: The address of your deployed relay's card endpoint (https://<your-deployment>/api/card), which merges the panel and the Spotify card into one image. Optional.
+    default: ""
+  mark:
+    description: Your watermark as SVG path data with straight segments only (M, L, H, V, Z), filled even-odd, up to 48 KB. Pass it from a secret (a repository secret named CODERPRINT_MARK, for example) so the path data never sits in your repository. It is drawn into the panel as pixels merged with the background; like any picture, what is drawn can still be seen and traced. Optional.
+    default: ""
+  mark-turn:
+    description: Degrees to turn the watermark.
+    default: "0"
+  force:
+    description: Redraw even if fewer repositories are visible than last time (a deleted repository, or a token that lost access).
+    default: "false"
+  commit:
+    description: Commit and push the panel and README when they change.
+    default: "true"
+
+runs:
+  using: composite
+  steps:
+    - name: Draw the panel
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.token }}
+        CARDS_OWNER: ${{ inputs.owner }}
+        CARDS_WINDOW: ${{ inputs.window }}
+        CARDS_SPOTIFY_UID: ${{ inputs.spotify-uid }}
+        CARDS_RELAY: ${{ inputs.relay }}
+        CARDS_MARK_DATA: ${{ inputs.mark }}
+        CARDS_MARK_TURN: ${{ inputs.mark-turn }}
+        FORCE: ${{ inputs.force == 'true' && '1' || '' }}
+        COMMIT: ${{ inputs.commit }}
+      run: |
+        if [ "$COMMIT" = true ]; then
+          branch=$(git symbolic-ref -q --short HEAD) || { echo "::error::coderprint must run on a branch, not a tag"; exit 1; }
+          # draw on the newest commit, so anything pushed since the run was queued is drawn around
+          timeout 60 git pull -q --ff-only origin "$branch"
+        fi
+        timeout -k 30 1100 python3 "$GITHUB_ACTION_PATH/coderprint.py"
+
+    - name: Commit the panel if it changed
+      if: ${{ inputs.commit == 'true' }}
+      shell: bash
+      run: |
+        branch=$(git symbolic-ref -q --short HEAD) || { echo "::error::coderprint must run on a branch, not a tag"; exit 1; }
+        git add assets README.md
+        if git diff --cached --quiet; then echo "no change"; exit 0; fi
+        git config user.name "github-actions[bot]"
+        git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+        git commit -q -m "Refresh profile panel"
+        # if someone pushed while this run was drawing, stop rather than overwrite them; tomorrow redraws
+        if ! timeout 60 git pull -q --rebase origin "$branch"; then
+          git rebase --abort 2>/dev/null
+          echo "::error::The branch changed while the panel was being drawn, so nothing was pushed. The next run redraws it."
+          exit 1
+        fi
+        timeout 120 git push -q origin "HEAD:refs/heads/$branch"
