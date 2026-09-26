@@ -34,7 +34,16 @@ compressed. The mix at each moment is a kernel-weighted share of the lines writt
 toward a bridge between the well-supported moments either side, so a quiet stretch shows the mix
 moving from one period of work to the next, and a veil darkens it by how little evidence it rests on.
 Evidence is judged per day, so steady work reads as steady at every scale. Every moment sums to
-exactly 100%. At most six tick marks, 0 always among them, chosen by the data and never crowding.
+exactly 100%. At most six tick marks, now always among them, chosen by the data and never crowding.
+Languages under 1% of the window's lines are drawn as Other. A thin red Pareto line runs over the
+stream: the running share of every line in the chart, from 0% at its left edge to 100% at now. In the
+activity bars above, each slice's lines rise in green and its commits hang below in red; each burst is
+labelled with its lines, and the bars' left end with the day they start.
+
+Motion: only ever added to a finished panel, and none for a visitor who asks for reduced motion.
+Today's activity bar breathes; in the stats rows one dot at a time hops along a row's leader and its
+value lights green as the dot arrives; the Pareto line draws itself, fast where lines came fast and
+slow across quiet time, then holds. A viewer whose animation clock never starts sees the whole panel.
 
 The watermark: CARDS_MARK_DATA holds its outline as SVG path data (straight segments, filled
 even-odd), passed from a secret so the path data is never written to the repository. It is drawn into
@@ -46,16 +55,27 @@ card merged into one image, so neither arrives before the other. Without one, th
 beside the Spotify widget at 35.6% (320x445, so the heights match on any screen). Nothing here repeats
 what the GitHub profile already shows (name, status, links, location, contribution count).
 
+Days: active days and streaks count calendar days in the owner's own time zone, and only when the
+public profile already shows it. The local time GitHub displays on a profile gives the zone's offset
+from UTC today, and the profile's location, looked up in a table of places built from GeoNames, gives a
+zone. The shown time zone always wins: the location can only choose among the zones with that offset
+today, which settles daylight saving for past days, and a location that says otherwise is ignored. A
+location that could mean places in different zones ("Santa Clara", "USA", "SF / NYC") settles nothing:
+days then fall at the shown offset, fixed for all past days so their daylight saving is ignored, or with
+no shown time zone, in UTC. The zone is never printed or written anywhere.
+
 Themes: the five house themes. GitHub tells a README image whether the visitor uses light or dark
 mode (a <picture> with prefers-color-scheme), so the script draws one panel for each; the light one
 rotates daily through Paper, Sepia and Sage, the dark one through Oxblood and Ink, and a strip at the
-top names all five with today's lit. The strip and the window selector look like switches on
-purpose: an image cannot switch anything, so a click goes to where the widget is installed.
+top names all five with today's lit. The strip and the window selector look like switches
+on purpose: an image cannot switch anything, so a click goes to where the widget is installed.
 """
 import base64
 import bisect
 import datetime as dt
+import gzip
 import hashlib
+import http.client
 import json
 import math
 import os
@@ -67,8 +87,17 @@ import struct
 import subprocess
 import sys
 import tempfile
+import time
+import unicodedata
+import urllib.parse
+import urllib.request
 import zlib
-from collections import Counter
+from collections import Counter, namedtuple
+
+try:
+    import zoneinfo
+except ImportError:   # Python before 3.9: days stay in UTC or at the profile's fixed offset
+    zoneinfo = None
 
 WORK = os.getcwd()   # the profile repository being drawn for
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -134,6 +163,7 @@ THEMES = {
 THEME_ORDER = ["paper", "sepia", "sage", "oxblood", "ink"]
 LIGHT_THEMES, DARK_THEMES = ["paper", "sepia", "sage"], ["oxblood", "ink"]
 GREEN = "#53b14f"   # the Spotify widget's green, for the bars that echo its equalizer
+RED = "#ff2e2e"     # the Pareto line, the one bright mark on the chart
 SANS = "-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif"   # the widget's stack
 MONO = ("'IBM Plex Mono', ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, 'Liberation Mono', "
         "monospace")
@@ -164,6 +194,23 @@ SNAP = 4.0                  # a data tick may sit at most this far from the mome
 MAX_TICKS = 6
 LADDER = [1, 7, 30, 365, 90, 180] + [365 * k for k in range(2, 61)]   # round spans, in the order tried
 FUTURE_SLACK = 86400        # a commit dated further ahead than this is a broken clock, and is left out
+
+# Local days (see "Days" above). places.tsv.gz is built by tools/build_places.py from GeoNames data,
+# licensed under Creative Commons Attribution 4.0.
+PLACES_FILE = os.path.join(HERE, "places.tsv.gz")
+PROFILE_TIMEOUT = 10        # seconds for the whole read of the public profile page
+LOCATION_TIMEOUT = 30       # seconds for the query that reads the profile's location
+PROFILE_LIMIT = 4 << 20     # a profile page larger than this is not read
+LOCATION_LIMIT = 256        # characters of a location that are read
+CLEAR_SHARE = 0.75          # a location has a zone only when one zone's rules cover this share of its people
+# zones alike on every one of these days count days alike: from 2016 to two years past today
+RULES_DAYS = (dt.date(2016, 1, 1).toordinal(),
+              max(dt.date(2028, 1, 1), dt.date.today() + dt.timedelta(days=731)).toordinal())
+PART_SPLIT = r"[,;/|()\[\]\n•·]+|\s[-–—]\s"   # how a location's parts are separated
+NOT_PLACES = {"asia", "apac", "emea", "north", "south", "east", "west"}   # words in profiles that towns share
+TAGS = {"ai", "ml"}         # read as places only when they are the whole location
+KEEP_CODES = {"usa", "uae"}  # three letters that do mean a country when written alone
+Place = namedtuple("Place", "id country region people zone")
 
 # The current theme's colors; use_theme() sets them before each panel is drawn.
 BG = LINE = TEXT = MUTED = DIM = OTHER_COLOR = ""
@@ -230,14 +277,14 @@ def truthy(name):
     return os.environ.get(name, "").strip().lower() in ("1", "true", "yes")
 
 
-def run(args, cwd=None, env=None):
+def run(args, cwd=None, env=None, timeout=TIMEOUT):
     """Run a command. Failures carry only the program's name: argv can hold a clone URL, which would
     name a private repository in a public log, so no exception that carries argv leaves here."""
     what = os.path.basename(args[0])
     try:
-        p = subprocess.run(args, cwd=cwd, env=env, capture_output=True, timeout=TIMEOUT)
+        p = subprocess.run(args, cwd=cwd, env=env, capture_output=True, timeout=timeout)
     except subprocess.TimeoutExpired:
-        raise RuntimeError("%s timed out after %d seconds" % (what, TIMEOUT)) from None
+        raise RuntimeError("%s timed out after %d seconds" % (what, timeout)) from None
     except OSError:
         raise RuntimeError("%s could not be started" % what) from None
     if p.returncode != 0:
@@ -245,12 +292,12 @@ def run(args, cwd=None, env=None):
     return p.stdout
 
 
-def gql(query, **variables):
+def gql(query, timeout=TIMEOUT, **variables):
     args = ["gh", "api", "graphql", "-f", "query=" + query]
     for k, v in variables.items():
         args += ["-f", "%s=%s" % (k, v)]
-    data = json.loads(run(args).decode("utf-8"))
-    if "data" not in data:
+    data = json.loads(run(args, timeout=timeout).decode("utf-8"))
+    if not isinstance(data, dict) or "data" not in data:
         raise RuntimeError("the GitHub API returned no data")
     return data["data"]
 
@@ -421,6 +468,261 @@ def remove_tree(path):
         say("note: some temporary clones could not be removed")
 
 
+# ---------------------------------------------------------------- days
+
+
+def place_key(text):
+    """A place name as the place table stores it: accents dropped, case folded, and anything but letters
+    and digits turned into single spaces, so "São Paulo" and "sao paulo" are one name."""
+    text = unicodedata.normalize("NFKD", text)
+    text = "".join(ch for ch in text if not unicodedata.combining(ch)).casefold()
+    return " ".join("".join(ch if ch.isalnum() else " " for ch in text).split())
+
+
+_places = None
+
+
+def load_places():
+    """The place table: which countries, regions and cities each name can mean, and every city by country
+    and by region. Read once; if the file is missing or damaged the table is empty, so no location is
+    recognised and days stay as they would be without one."""
+    global _places
+    if _places is None:
+        countries, regions, cities, in_country, in_region = {}, {}, {}, {}, {}
+        try:
+            with gzip.open(PLACES_FILE, "rt", encoding="utf-8") as f:
+                for line in f:
+                    row = line.rstrip("\n").split("\t")
+                    if row[0] == "C" and len(row) == 3:
+                        for key in row[2].split("|"):
+                            countries.setdefault(key, set()).add(row[1])
+                    elif row[0] == "A" and len(row) == 4:
+                        for key in row[3].split("|"):
+                            regions.setdefault(key, set()).add((row[1], row[2]))
+                    elif row[0] == "P" and len(row) == 7:
+                        place = Place(int(row[1]), row[2], row[3], int(row[4]), row[5])
+                        for key in row[6].split("|"):
+                            cities.setdefault(key, []).append(place)
+                        in_country.setdefault(place.country, []).append(place)
+                        in_region.setdefault((place.country, place.region), []).append(place)
+        except (OSError, EOFError, ValueError, zlib.error):
+            countries, regions, cities, in_country, in_region = {}, {}, {}, {}, {}
+        _places = (countries, regions, cities, in_country, in_region)
+    return _places
+
+
+def location_parts(location, countries, regions, cities):
+    """A location's parts as place keys, in order and each once. A part written without its comma ("Santa
+    Clara CA") is split where a known city meets a country or region. Words that towns happen to share but
+    profiles use for something else ("Asia", "North") are dropped, and so are "AI" and "ML" beside a place."""
+    parts = []
+    for part in re.split(PART_SPLIT, location[:LOCATION_LIMIT]):
+        key = place_key(part)
+        words = key.split()
+        if key and key not in cities and key not in countries and key not in regions:
+            for k in (1, 2):
+                head, tail = " ".join(words[:-k]), " ".join(words[-k:])
+                if head in cities and (tail in countries or tail in regions):
+                    parts += [head, tail]
+                    break
+            else:
+                parts.append(key)
+        elif key:
+            parts.append(key)
+    parts = [p for p in dict.fromkeys(parts) if p not in NOT_PLACES]
+    return [p for p in parts if p not in TAGS] if len(parts) > 1 else parts
+
+
+def location_places(location):
+    """The places a profile's location names, as one group of candidate cities per place named.
+
+    Every city in a group agrees with each other part of the location that names a country or region, so
+    "Santa Clara, CA" is the one in California and "Toronto, CA" the one in Canada. Parts that only name
+    a city come first; if the other parts rule out every such city ("Pune, MH" were MH not known as
+    Maharashtra), the location is not understood and nothing is returned, rather than reading the code as
+    somewhere else. Otherwise a named region competes with towns of its name ("Ontario" is the province,
+    not the town in California), a region and a country of one name compete ("Georgia"), and a country
+    named alone stands for all its cities. A three-letter country code written alone ("Mac") is not read."""
+    countries, regions, cities, in_country, in_region = load_places()
+    parts = location_parts(location, countries, regions, cities)
+    named = lambda p: p in countries or p in regions
+
+    def agrees(place, i):
+        return all(place.country in countries.get(q, ()) or (place.country, place.region) in regions.get(q, ())
+                   for j, q in enumerate(parts) if j != i and named(q))
+
+    def towns(i, p):   # the cities called p that fit, and only those in the country p names, if it names one
+        return {pl.id: pl for pl in cities.get(p, ())
+                if (p not in countries or pl.country in countries[p]) and agrees(pl, i)}
+
+    only_city = [i for i, p in enumerate(parts) if p in cities and not named(p)]
+    if only_city:
+        groups = [towns(i, parts[i]) for i in only_city]
+        return [list(g.values()) for g in groups] if all(groups) else []
+    groups = []
+    for i, p in enumerate(parts):
+        if not named(p):
+            continue
+        group = towns(i, p)
+        for key in regions.get(p, ()):   # each region of the name, unless it holds its own town of the name
+            if not any((pl.country, pl.region) == key for pl in group.values()):
+                group.update((pl.id, pl) for pl in in_region.get(key, ()) if agrees(pl, i))
+        if p in regions:
+            group.update((pl.id, pl) for cc in countries.get(p, ()) for pl in in_country.get(cc, ()) if agrees(pl, i))
+        if group:
+            groups.append(list(group.values()))
+    if groups:
+        return groups
+    unknown = any(p not in cities and not named(p) for p in parts)
+    for i, p in enumerate(parts):
+        # a code beside a name nothing knows may be a local abbreviation ("St. Gallen, SG"), and a
+        # three-letter code alone is usually a word ("Mac"), so neither is read as a country
+        if len(p) <= 3 and p not in KEEP_CODES and (unknown or (len(parts) == 1 and len(p) == 3)):
+            continue
+        group = {pl.id: pl for cc in countries.get(p, ()) for pl in in_country.get(cc, ()) if agrees(pl, i)}
+        if group:
+            groups.append(list(group.values()))
+    return groups
+
+
+_rules = {}
+
+
+def zone_rules(zone):
+    """A zone's offset from UTC, in minutes, at noon UTC on every day of RULES_DAYS, or None if this
+    machine has no rules for it. Two zones with the same list count days alike."""
+    if zone not in _rules:
+        try:
+            tz = zoneinfo.ZoneInfo(zone)
+            _rules[zone] = tuple(
+                int(dt.datetime.fromordinal(d).replace(hour=12, tzinfo=dt.timezone.utc).astimezone(tz)
+                    .utcoffset().total_seconds()) // 60 for d in range(*RULES_DAYS))
+        except (AttributeError, ValueError, OSError, KeyError):   # KeyError: ZoneInfoNotFoundError
+            _rules[zone] = None
+    return _rules[zone]
+
+
+def clear_zone(places):
+    """The zone whose rules cover at least CLEAR_SHARE of the people in these places, or None. Zones that
+    count days alike are one here, as America/New_York and America/Detroit are; the zone named is the one
+    of its biggest place."""
+    people, biggest = {}, {}
+    for place in places:
+        rules = zone_rules(place.zone)
+        if rules is None:
+            continue
+        n = max(place.people, 1)
+        people[rules] = people.get(rules, 0) + n
+        if n > biggest.get(rules, (0, None))[0]:
+            biggest[rules] = (n, place.zone)
+    if not people:
+        return None
+    top = max(people, key=people.get)
+    return biggest[top][1] if people[top] >= CLEAR_SHARE * sum(people.values()) else None
+
+
+def zone_offset(zone, now):
+    """A zone's offset from UTC at now, in minutes."""
+    return int(dt.datetime.fromtimestamp(now, zoneinfo.ZoneInfo(zone)).utcoffset().total_seconds()) // 60
+
+
+def local_zone(offset, location, now, seen=None):
+    """The time zone days are counted in. offset is the profile's shown time zone, in minutes from UTC,
+    read at seen, and always wins: the location only chooses among the zones with that offset then, which
+    fixes daylight saving for past days, and "USA" at UTC-7 in summer is Los Angeles because that zone's
+    rules cover 75% of the people there, so the choice can differ between a summer and a winter run. A
+    location that names places in different zones ("SF / NYC") chooses nothing. With no shown time zone,
+    the location's own zone. With neither, or no clear answer, the shown offset fixed for all past days, so
+    their daylight saving is ignored, or UTC."""
+    try:
+        groups = location_places(location) if location else []
+        if offset is not None:
+            instants = {now, now if seen is None else seen}   # daylight saving may change between the two
+            groups = [[p for p in g if zone_rules(p.zone) is not None
+                       and any(zone_offset(p.zone, t) == offset for t in instants)] for g in groups]
+            groups = [g for g in groups if g]
+        zones = [clear_zone(g) for g in groups]
+        if zones and all(zones) and len({zone_rules(z) for z in zones}) == 1:
+            biggest = max(range(len(groups)), key=lambda k: sum(max(p.people, 1) for p in groups[k]))
+            return zoneinfo.ZoneInfo(zones[biggest])
+    except Exception:   # this only refines how days are counted, so nothing in it may stop the run
+        pass
+    if offset is not None:
+        return dt.timezone(dt.timedelta(minutes=offset))
+    return dt.timezone.utc
+
+
+def zone_database():
+    """Whether this Python has time zone rules at all (Windows needs the tzdata package for them)."""
+    try:
+        zoneinfo.ZoneInfo("America/New_York")
+        return True
+    except Exception:
+        return False
+
+
+class GitHubOnly(urllib.request.HTTPRedirectHandler):
+    """Follows a redirect only to another https page on github.com; any other is refused as an error."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        target = urllib.parse.urlsplit(newurl)
+        if target.scheme != "https" or target.hostname != "github.com":
+            return None
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+def profile_offset(owner):
+    """The offset from UTC, in minutes, of the local time GitHub shows on the owner's public profile, and
+    when it was read; None when the profile shows none or cannot be read within PROFILE_TIMEOUT. The page
+    is fetched signed out, as any visitor sees it, and only over https from github.com."""
+    if not re.fullmatch(r"[A-Za-z0-9-]{1,39}", owner or ""):
+        return None
+    request = urllib.request.Request("https://github.com/" + owner, headers={"User-Agent": "coderprint"})
+    deadline, body = time.monotonic() + PROFILE_TIMEOUT, bytearray()
+    try:
+        with urllib.request.build_opener(GitHubOnly).open(request, timeout=PROFILE_TIMEOUT) as page:
+            final = urllib.parse.urlsplit(page.geturl())
+            if final.scheme != "https" or final.hostname != "github.com":
+                return None
+            while len(body) <= PROFILE_LIMIT:
+                if time.monotonic() > deadline:
+                    return None
+                chunk = page.read(1 << 16)
+                if not chunk:
+                    break
+                body += chunk
+    except (OSError, ValueError, http.client.HTTPException):
+        return None
+    seen = time.time()
+    if len(body) > PROFILE_LIMIT:
+        return None
+    at = body.find(b"<profile-timezone")
+    if at < 0:
+        return None
+    end = body.find(b">", at, at + 2048)
+    m = re.search(rb'\sdata-hours-ahead-of-utc="([-+]?[0-9]{1,2}(?:\.[0-9]{1,4})?)"',
+                  bytes(body[at:end if end >= 0 else at + 2048]))
+    if not m:
+        return None
+    minutes = float(m.group(1)) * 60
+    if minutes != round(minutes) or not -720 <= minutes <= 840 or round(minutes) % 15:
+        return None
+    return int(round(minutes)), seen
+
+
+def profile_location(owner):
+    """The location on the owner's public profile, or "" when there is none or it cannot be read."""
+    try:
+        data = gql("query($owner: String!) { repositoryOwner(login: $owner) { "
+                   "... on User { location } ... on Organization { location } } }",
+                   timeout=LOCATION_TIMEOUT, owner=owner)
+    except (RuntimeError, ValueError):
+        return ""
+    found = data.get("repositoryOwner") if isinstance(data, dict) else None
+    location = found.get("location") if isinstance(found, dict) else None
+    return location[:LOCATION_LIMIT] if isinstance(location, str) else ""
+
+
 # ---------------------------------------------------------------- numbers
 
 
@@ -440,10 +742,28 @@ def plural(n, word):
     return "%d %s%s" % (n, word, "" if n == 1 else "s")
 
 
-def activity(times, now):
-    """Active days, the longest streak and the current streak, over the days (UTC) with a commit. The
-    current streak may end yesterday, since today is not over."""
-    days = sorted({dt.datetime.fromtimestamp(t, dt.timezone.utc).date() for t in times})
+def span_words(S):
+    """How long ago a span of S days began, rounded up: whole days, or whole hours when under a day."""
+    if S < 1:
+        return plural(max(1, math.ceil(S * 24 - 1e-9)), "hour") + " ago"
+    return plural(math.ceil(S - 1e-9), "day") + " ago"
+
+
+MONTHS = ["JAN", "FEB", "MAR", "APR", "MAY", "JUN", "JUL", "AUG", "SEP", "OCT", "NOV", "DEC"]
+
+
+def day_label(t, zone):
+    """A moment's calendar day in zone, written the house way: 06MAR2026."""
+    d = dt.datetime.fromtimestamp(t, zone).date()
+    return "%02d%s%d" % (d.day, MONTHS[d.month - 1], d.year)
+
+
+def activity(times, now, zone=dt.timezone.utc):
+    """Active days, the longest streak and the current streak, over the days with a commit, as calendar
+    days in zone (see local_zone). The current streak may end yesterday, since today is not over. A commit
+    dated up to FUTURE_SLACK ahead counts as today, so a fast clock cannot open a gap in the streak."""
+    today = dt.datetime.fromtimestamp(now, zone).date()
+    days = sorted({min(dt.datetime.fromtimestamp(t, zone).date(), today) for t in times})
     if not days:
         return 0, 0, 0
     longest = run_len = 0
@@ -452,7 +772,6 @@ def activity(times, now):
         run_len = run_len + 1 if prev is not None and (d - prev).days == 1 else 1
         longest = max(longest, run_len)
         prev = d
-    today = dt.datetime.fromtimestamp(now, dt.timezone.utc).date()
     have, d, current = set(days), days[-1], 0
     if (today - d).days <= 1:
         while d in have:
@@ -666,10 +985,11 @@ def mix_along(events, S, c, layers, top, recent_day=None):
 
 
 def tick_label(v, S):
-    """Negative whole days; the start label rounds up, so a span of 1.5 days reads -2."""
+    """Whole days before now, "now" at the 0 line, and the start in words, rounded up: a span of 1.5 days
+    starts 2 DAYS AGO, and one under a day starts so many hours ago."""
     if v == 0:
-        return "0"
-    return "-%d" % (math.ceil(S - 1e-9) if v == S else v)
+        return "now"
+    return span_words(S) if v == S else "%d" % v
 
 
 def tick_box(v, S, c):
@@ -806,12 +1126,71 @@ def hexrgb(color):
 
 
 def png(width, height, rows):
-    """An RGB PNG from rows of bytes, with the standard library only."""
+    """A lossless PNG from rows of RGB bytes, with the standard library only: indexed, at the fewest bits a
+    pixel needs, when there are 256 colors or fewer, and otherwise RGB with each row's filter chosen by
+    the usual smallest-sum rule; the smaller of that and no filtering at all is kept."""
+    rows = [bytes(r) for r in rows]
+    colors = Counter(r[k:k + 3] for r in rows for k in range(0, len(r), 3))
+
     def chunk(kind, body):
         return struct.pack(">I", len(body)) + kind + body + struct.pack(">I", zlib.crc32(kind + body) & 0xffffffff)
-    raw = b"".join(b"\x00" + bytes(r) for r in rows)
-    return (b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0))
-            + chunk(b"IDAT", zlib.compress(raw, 9)) + chunk(b"IEND", b""))
+
+    if len(colors) <= 256:
+        palette = [c for c, _ in colors.most_common()]
+        index = {c: k for k, c in enumerate(palette)}
+        data = [bytes(index[r[k:k + 3]] for k in range(0, len(r), 3)) for r in rows]
+        bpp, ctype = 1, 3
+        depth = next(b for b in (1, 2, 4, 8) if len(palette) <= 1 << b)
+        if depth < 8:
+            per = 8 // depth
+            packed = []
+            for r in data:
+                out = bytearray()
+                for k in range(0, len(r), per):
+                    byte = 0
+                    for j in range(per):
+                        byte = (byte << depth) | (r[k + j] if k + j < len(r) else 0)
+                    out.append(byte)
+                packed.append(bytes(out))
+            data = packed
+        extra = chunk(b"PLTE", b"".join(palette))
+    else:
+        data, bpp, ctype, depth, extra = rows, 3, 2, 8, b""
+
+    def filtered(prev, cur):
+        best = None
+        for ft in range(5):
+            out = bytearray([ft])
+            for k in range(len(cur)):
+                a = cur[k - bpp] if k >= bpp else 0
+                b = prev[k] if prev is not None else 0
+                c = prev[k - bpp] if prev is not None and k >= bpp else 0
+                if ft == 0:
+                    p = 0
+                elif ft == 1:
+                    p = a
+                elif ft == 2:
+                    p = b
+                elif ft == 3:
+                    p = (a + b) >> 1
+                else:
+                    pa, pb, pc = abs(b - c), abs(a - c), abs(a + b - 2 * c)
+                    p = a if pa <= pb and pa <= pc else (b if pb <= pc else c)
+                out.append((cur[k] - p) & 0xff)
+            score = sum(v if v < 128 else 256 - v for v in out[1:])
+            if best is None or score < best[0]:
+                best = (score, out)
+        return bytes(best[1])
+
+    candidates = [zlib.compress(b"".join(b"\x00" + r for r in data), 9)]
+    if depth == 8:   # filters work on whole bytes, so packed indexes gain nothing from them
+        prev, parts = None, []
+        for r in data:
+            parts.append(filtered(prev, r))
+            prev = r
+        candidates.append(zlib.compress(b"".join(parts), 9))
+    return (b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", width, height, depth, ctype, 0, 0, 0))
+            + extra + chunk(b"IDAT", min(candidates, key=len)) + chunk(b"IEND", b""))
 
 
 def flattened_mark(polys, turn):
@@ -916,9 +1295,137 @@ def wordmark(word):
     """The coderprint wordmark in the bottom right corner, over the watermark, in the headline's color."""
     d, (bx, by, bw, bh) = word
     s = WORDMARK_WIDTH / bw
-    return ('<path d="%s" fill="%s" fill-rule="evenodd" transform="translate(%.2f %.2f) scale(%.5f) '
-            'translate(%.2f %.2f)"/>' % (d, TEXT, WORDMARK_RIGHT - WORDMARK_WIDTH, WORDMARK_BOTTOM - bh * s, s,
-                                         -bx, -by))
+    # the glow wraps the path rather than sitting on it, so the filter is not scaled with the letters
+    return glow("glowS", '<path d="%s" fill="%s" fill-rule="evenodd" transform="translate(%.2f %.2f) scale(%.5f) '
+                'translate(%.2f %.2f)"/>' % (relative_path(d), TEXT, WORDMARK_RIGHT - WORDMARK_WIDTH,
+                                             WORDMARK_BOTTOM - bh * s, s, -bx, -by))
+
+
+# ---------------------------------------------------------------- compact numbers and paths
+# A panel is fetched on every profile view, so it is written tight: shortest numbers, relative path data,
+# and every chart boundary written once.
+
+
+def num(v, d=1):
+    """The shortest SVG number at d decimals: 0.5 as .5, -0.50 as -.5, 3.0 as 3."""
+    s = "%.*f" % (d, v)
+    if "." in s:
+        s = s.rstrip("0").rstrip(".")
+    if s in ("-0", ""):
+        s = "0"
+    if s.startswith("0."):
+        s = s[1:]
+    elif s.startswith("-0."):
+        s = "-" + s[2:]
+    return s
+
+
+def joined(nums):
+    """Numbers run together as path data allows: a space between two, unless a minus sign separates them."""
+    out = ""
+    for s in nums:
+        out += s if not out or s.startswith("-") else " " + s
+    return out
+
+
+def simplify(points, eps):
+    """Douglas-Peucker on y(x): a point is kept unless the chord between its kept neighbours passes within
+    eps of it."""
+    keep = [False] * len(points)
+    keep[0] = keep[-1] = True
+    stack = [(0, len(points) - 1)]
+    while stack:
+        a, b = stack.pop()
+        (xa, ya), (xb, yb) = points[a], points[b]
+        worst, at = -1.0, None
+        for i in range(a + 1, b):
+            x, y = points[i]
+            dev = abs(y - (ya + (yb - ya) * (x - xa) / (xb - xa) if xb != xa else y - ya))
+            if dev > worst:
+                worst, at = dev, i
+        if at is not None and worst > eps:
+            keep[at] = True
+            stack += [(a, at), (at, b)]
+    return [p for p, k in zip(points, keep) if k]
+
+
+def rel_run(points):
+    """A line through points on whole-unit x, after its first point, as relative lineto data with y to a
+    tenth. Each step is taken between rounded absolute values, so no rounding error builds up."""
+    t = [(x, int(round(y * 10))) for x, y in points]
+    nums = []
+    for (xa, ya), (xb, yb) in zip(t, t[1:]):
+        nums += [num(xb - xa, 0), num((yb - ya) / 10.0)]
+    return "l" + joined(nums) if nums else ""
+
+
+PATH_TOKEN = re.compile(r"[MmLlHhVvCcSsQqTtZz]|[-+]?(?:\d+\.?\d*|\.\d+)(?:[eE][-+]?\d+)?")
+PATH_ARITY = {"M": 2, "L": 2, "H": 1, "V": 1, "C": 6, "S": 4, "Q": 4, "T": 2, "Z": 0}
+
+
+def relative_path(d, decimals=1):
+    """Path data (M L H V C S Q T Z, absolute or relative) rewritten as relative commands. Every absolute
+    coordinate is rounded first and each step taken between rounded values, so no error builds up."""
+    toks = PATH_TOKEN.findall(d)
+    i, cmd, out, last = 0, None, [], None
+    cx = cy = sx = sy = 0.0
+    q = 10 ** decimals
+    r = lambda v: round(v * q) / q
+    while i < len(toks):
+        if toks[i].isalpha():
+            cmd = toks[i]
+            i += 1
+            if cmd in "Zz":
+                out.append("z")
+                cx, cy, last = sx, sy, "z"
+                continue
+        up, rel = cmd.upper(), cmd.islower()
+        vals = [float(v) for v in toks[i:i + PATH_ARITY[up]]]
+        i += PATH_ARITY[up]
+        if up == "H":
+            x = r(cx + vals[0] if rel else vals[0])
+            letter, deltas, cx = "h", [x - cx], x
+        elif up == "V":
+            y = r(cy + vals[0] if rel else vals[0])
+            letter, deltas, cy = "v", [y - cy], y
+        else:
+            deltas = []
+            px, py = cx, cy
+            for k in range(0, len(vals), 2):
+                x = r(cx + vals[k] if rel else vals[k])
+                y = r(cy + vals[k + 1] if rel else vals[k + 1])
+                deltas += [x - px, y - py]
+                if up in "LMT":
+                    px, py = x, y
+            cx, cy = x, y
+            if up == "M":
+                sx, sy = cx, cy
+                cmd = "l" if rel else "L"   # coordinates repeated after a moveto are linetos
+            letter = up.lower()
+        body = joined([num(v, decimals) for v in deltas])
+        implicit = (letter == last and letter != "m") or (last == "m" and letter == "l")
+        out.append((body if body.startswith("-") else " " + body) if implicit else letter + body)
+        last = letter
+    return "".join(out)
+
+
+def luminance(color):
+    def channel(v):
+        v /= 255.0
+        return v / 12.92 if v <= 0.03928 else ((v + 0.055) / 1.055) ** 2.4
+    r, g, b = hexrgb(color)
+    return 0.2126 * channel(r) + 0.7152 * channel(g) + 0.0722 * channel(b)
+
+
+def contrast(a, b):
+    """The contrast ratio of two colors, as the Web Content Accessibility Guidelines define it."""
+    la, lb = luminance(a), luminance(b)
+    return (max(la, lb) + 0.05) / (min(la, lb) + 0.05)
+
+
+def over(top, alpha, under):
+    """top laid over under at alpha, as one color."""
+    return "#%02x%02x%02x" % tuple(int(round(alpha * t + (1 - alpha) * u)) for t, u in zip(hexrgb(top), hexrgb(under)))
 
 
 # ---------------------------------------------------------------- drawing
@@ -928,6 +1435,30 @@ def use_theme(name):
     global BG, LINE, TEXT, MUTED, DIM, OTHER_COLOR, THEME
     THEME = THEMES[name]
     BG, LINE, TEXT, MUTED, DIM, OTHER_COLOR = (THEME[k] for k in ("bg", "line", "text", "muted", "dim", "other"))
+
+
+# The dark themes glow: the greens bloom, the headline and the values carry a soft halo, the lit names and
+# the 0 line shine, and the corners fall away. All still filters, so a frozen animation clock changes
+# nothing. They work in the panel's own units, so a bar 1.5 units wide still gets its whole halo.
+_FULL = 'filterUnits="userSpaceOnUse" x="0" y="0" width="%d" height="%d" color-interpolation-filters="sRGB"' % (
+    PANEL_W, PANEL_H)
+GLOW_DEFS = (
+    '<filter id="glowG" %s><feGaussianBlur in="SourceGraphic" stdDeviation="3" result="b"/>'
+    '<feComponentTransfer in="b" result="c"><feFuncA type="linear" slope=".55"/></feComponentTransfer>'
+    '<feMerge><feMergeNode in="c"/><feMergeNode in="SourceGraphic"/></feMerge></filter>'
+    '<filter id="glowW" %s><feGaussianBlur in="SourceGraphic" stdDeviation="3.5" result="b"/>'
+    '<feComponentTransfer in="b" result="c"><feFuncA type="linear" slope=".3"/></feComponentTransfer>'
+    '<feMerge><feMergeNode in="c"/><feMergeNode in="SourceGraphic"/></feMerge></filter>'
+    '<filter id="glowS" %s><feGaussianBlur in="SourceGraphic" stdDeviation="2" result="b"/>'
+    '<feComponentTransfer in="b" result="c"><feFuncA type="linear" slope=".22"/></feComponentTransfer>'
+    '<feMerge><feMergeNode in="c"/><feMergeNode in="SourceGraphic"/></feMerge></filter>'
+    '<radialGradient id="vignette" cx="50%%" cy="48%%" r="75%%"><stop offset=".62" stop-color="#000" '
+    'stop-opacity="0"/><stop offset="1" stop-color="#000" stop-opacity=".22"/></radialGradient>' % (_FULL, _FULL, _FULL))
+
+
+def glow(name, content):
+    """content inside one of the glow filters in a dark theme, as it is in a light one."""
+    return '<g filter="url(#%s)">%s</g>' % (name, content) if THEME["dark"] else content
 
 
 def esc(s):
@@ -955,11 +1486,13 @@ def switch(names, lit, x, y):
     for i, name in enumerate(names):
         w = LABEL_CHAR * len(name)
         on = i == lit
-        out += ('<text x="%.1f" y="%.1f" font-family="%s" font-size="9.5" font-weight="%d" fill="%s" '
-                'textLength="%.1f" lengthAdjust="spacing">%s</text>'
-                % (x, y, MONO, 600 if on else 500, TEXT if on else DIM, w - 1.3, esc(name.upper())))
+        name_text = ('<text x="%.1f" y="%.1f" font-family="%s" font-size="9.5" font-weight="%d" fill="%s" '
+                     'textLength="%.1f" lengthAdjust="spacing">%s</text>'
+                     % (x, y, MONO, 600 if on else 500, TEXT if on else DIM, w - 1.3, esc(name.upper())))
+        out += glow("glowS", name_text) if on else name_text
         if on:
-            out += '<rect x="%.1f" y="%.1f" width="%.1f" height="1.5" rx=".75" fill="%s"/>' % (x, y + 4, w - 1.3, GREEN)
+            out += glow("glowG", '<rect x="%.1f" y="%.1f" width="%.1f" height="1.5" rx=".75" fill="%s"/>'
+                        % (x, y + 4, w - 1.3, GREEN))
         if i < len(names) - 1:
             sep = x + w + gap / 2 - 0.65
             out += '<line x1="%.1f" y1="%.1f" x2="%.1f" y2="%.1f" stroke="%s"/>' % (sep, y - 8, sep, y + 2, LINE)
@@ -973,57 +1506,240 @@ def switch_width(names):
 
 
 def theme_strip(active):
-    """paper | sepia | sage | oxblood | ink, centred at the top, with today's theme lit."""
-    return switch(THEME_ORDER, THEME_ORDER.index(active), (PANEL_W - switch_width(THEME_ORDER)) / 2, 24)
+    """paper | sepia | sage | oxblood | ink, centred at the top, with today's theme lit. Its baseline sits
+    where it shares a centre line with the Spotify card's header across the seam."""
+    return switch(THEME_ORDER, THEME_ORDER.index(active), (PANEL_W - switch_width(THEME_ORDER)) / 2, 30)
+
+
+def window_names():
+    return [WINDOWS[k][0] for k in WINDOW_ORDER]
 
 
 def window_selector(window):
     """ALL | 10Y | 5Y | 3Y | 2Y | 12M at the chart's top right, the panel's window lit."""
-    names = [WINDOWS[k][0] for k in WINDOW_ORDER]
+    names = window_names()
     return switch(names, WINDOW_ORDER.index(window), 560 - switch_width(names), 192)
 
 
-def stats_block(window, S, new_lines, spark, rows):
-    out = label(16, 52, "new lines written · " + WINDOWS[window][1])
-    out += text(15, 94, fmt(new_lines), 40, TEXT, SANS, 700)
-    peak = float(max(spark) or 1)
+# The activity bars' bursts: runs of bars not broken by BURST_GAP or more empty bars (about 12 days at 52
+# bars). Each is labelled with its lines, so the bars show where the headline came from.
+BURST_GAP, BURSTS_SHOWN, BURST_SIZE = 3, 4, 8.5
+
+
+def bursts(spark):
+    """[first bar, last bar, lines] for each run of bars not broken by BURST_GAP or more empty bars."""
+    out, cur, empty = [], None, 0
+    for i, v in enumerate(spark):
+        if v:
+            if cur is None or empty >= BURST_GAP:
+                if cur:
+                    out.append(cur)
+                cur = [i, i, 0]
+            cur[1] = i
+            cur[2] += v
+            empty = 0
+        else:
+            empty += 1
+    if cur:
+        out.append(cur)
+    return out
+
+
+def burst_labels(spark, new_lines, tops):
+    """Each burst's lines over its tallest bar (tops: each slice's highest drawn point), the biggest bursts
+    first, none against the headline or another label. Nothing when the bars are one burst, since the
+    headline already says it."""
+    groups = bursts(spark)
+    if len(groups) < 2:
+        return ""
     step = 264.0 / len(spark)
     width = max(1.5, step * 0.6)
+    cap = 0.72 * BURST_SIZE   # digits, k and M have no descenders
+    head = (12.0, 94 - 0.72 * 40 - 3, 15 + 0.62 * 40 * len(fmt(new_lines)) + 3, 97.0)   # with 3 units clear
+    hits = lambda a, b: a[0] < b[2] and b[0] < a[2] and a[1] < b[3] and b[1] < a[3]
+    kept, out = [], ""
+    for first, last, total in sorted(groups, key=lambda g: -g[2])[:BURSTS_SHOWN]:
+        s = fmt(total)
+        w = len(s) * BURST_SIZE * 0.6
+        cx = min(max(16 + (first + last) * step / 2 + width / 2, 16 + w / 2), 280 - w / 2)
+        top = min(tops[first:last + 1])
+        box = (cx - w / 2 - 4, top - 5 - cap, cx + w / 2 + 4, top - 5)
+        if hits(box, head):   # tucked just over the burst's tallest bar instead
+            box = (box[0], top - 1.2 - cap, box[2], top - 1.2)
+            if hits(box, head):
+                continue
+        if any(box[0] < b[2] and b[0] < box[2] for b in kept):
+            continue
+        kept.append(box)
+        out += text(cx, box[3], s, BURST_SIZE, MUTED, MONO, 500, "middle")
+    return out
+
+
+def leader(name, value):
+    """Where a stats row's leader starts, and how many squares it holds between the name and the value."""
+    start = 306 + LABEL_CHAR * len(name) + 6
+    stop = 560 - 7.6 * len(value) - 8
+    return start, (int((stop - start) // BIT_PITCH) + 1 if stop > start else 0)
+
+
+def hop_plan(rows):
+    """The dots' timetable. The rows take turns, so one dot is on the panel at a time: a row's dot rests
+    HOP on each square, its value lights, and after HOP_REST the next row's dot sets off. Returns the hops
+    in one loop, whose length every row shares, and when each row's dot sets off, in seconds."""
+    starts, t = [], 0.0
+    for name, value in rows:
+        starts.append(t)
+        n = leader(name, value)[1]
+        if n:
+            t += (n + 1) * HOP + HOP_REST
+    return max(1, int(math.ceil((t + HOP_END) / HOP))), starts
+
+
+BAR_BASE, BAR_REACH = 124, 20   # the activity bars' baseline, and how far a bar reaches from it at its peak
+
+
+def bar_height(v, peak):
+    """An activity bar's length: square-rooted, so a quiet slice still shows beside a burst."""
+    return 2 + (BAR_REACH - 2) * math.sqrt(v / peak) if v else 0.0
+
+
+def stats_block(window, S, new_lines, spark, rows, since=None, commits=None):
+    """The headline, the activity bars with their bursts, and the stats rows. since: the day the bars
+    start, written out; without it, how long ago. commits: commits per bar. Lines rise in green above the
+    bars' baseline and commits hang in red below it, each scaled to its own peak."""
+    out = label(16, 52, "new lines written · " + WINDOWS[window][1])
+    out += glow("glowW", text(15, 94, fmt(new_lines), 40, TEXT, SANS, 700))
+    peak = float(max(spark) or 1)
+    cpeak = float(max(commits) if commits else 0) or 1.0
+    step = 264.0 / len(spark)
+    width = max(1.5, step * 0.6)
+    bars, tops = "", []
     for i, v in enumerate(spark):
         x = 16 + i * step
-        now = ' class="now"' if i == len(spark) - 1 else ""
-        if v:
-            h = 3 + 34 * math.sqrt(v / peak)
-            out += ('<rect%s x="%.2f" y="%.2f" width="%.2f" height="%.2f" rx="%.2f" fill="%s"/>'
-                    % (now, x, 142 - h, width, h, width / 2, GREEN))
-        else:
-            out += '<rect%s x="%.2f" y="141" width="%.2f" height="1" fill="%s"/>' % (now, x, width, LINE)
-    days = math.ceil(S - 1e-9)
-    out += label(16, 158, plural(days, "day") + " ago", size=8) + label(280, 158, "today", "end", size=8)
+        now = ' class="cp-now"' if i == len(spark) - 1 else ""
+        up, down = bar_height(v, peak), bar_height(commits[i] if commits else 0, cpeak)
+        if up:
+            bars += ('<rect%s x="%.2f" y="%.2f" width="%.2f" height="%.2f" rx="%.2f" fill="%s"/>'
+                     % (now, x, BAR_BASE - 1 - up, width, up, width / 2, GREEN))
+        if down:
+            bars += ('<rect%s x="%.2f" y="%d" width="%.2f" height="%.2f" rx="%.2f" fill="%s"/>'
+                     % (now, x, BAR_BASE + 1, width, down, width / 2, RED))
+        if not up and not down:
+            bars += '<rect%s x="%.2f" y="%.1f" width="%.2f" height="1" fill="%s"/>' % (now, x, BAR_BASE - 0.5, width, LINE)
+        tops.append(BAR_BASE - 1 - up)
+    out += glow("glowG", bars) + burst_labels(spark, new_lines, tops)
+    out += label(16, 158, since or span_words(S), size=8) + label(280, 158, "today", "end", size=8)
+    if commits and any(commits):   # the key, between the start and today
+        x = 148 - (30 + TICK_CHAR * 12 - 2.6) / 2   # two swatches, two words, 12 units between the pairs
+        for word, color in (("lines", GREEN), ("commits", RED)):
+            out += ('<rect x="%s" y="152.5" width="5" height="5" rx="1" fill="%s"/>' % (num(x, 2), color)
+                    + label(x + 9, 158, word, size=8))
+            x += 9 + TICK_CHAR * len(word) - 1.3 + 12
     out += '<line x1="292" y1="42" x2="292" y2="156" stroke="%s"/>' % LINE
+    trip, starts = hop_plan(rows)
     for i, (name, value) in enumerate(rows):
         y = 56 + i * 24
-        start = 306 + LABEL_CHAR * len(name) + 6
-        stop = 560 - 7.6 * len(value) - 8
-        leader = ('<line x1="%.1f" y1="%.1f" x2="%.1f" y2="%.1f" stroke="%s" stroke-width="1.8" '
-                  'stroke-dasharray="0.01 4.5" stroke-linecap="round"/>' % (start, y - 3, stop, y - 3, DIM)
-                  if stop > start else "")
-        out += label(306, y, name) + leader + text(560, y, value, 13, TEXT, SANS, 600, "end")
+        start, n = leader(name, value)
+        out += label(306, y, name)
+        if n:
+            # The leader is one line whose dashes are squares. The dot is a second, green line on it with
+            # one dash, which hops a square at a time and then off the end, where it waits out the loop;
+            # at rest it sits one square before the start, so a frozen clock shows the plain row.
+            seg = ('x1="%s" y1="%d" x2="%s" y2="%d" stroke-width="1.6" stroke-linecap="square"'
+                   % (num(start + 0.8, 2), y - 3, num(start + 0.81 + (n - 1) * BIT_PITCH, 2), y - 3))
+            out += '<line %s stroke="%s" stroke-dasharray=".01 %s"/>' % (seg, DIM, num(BIT_PITCH - 0.01, 2))
+            out += glow("glowG", '<line class="cp-hop" %s stroke="%s" stroke-dasharray=".01 %s" '
+                        'stroke-dashoffset="%s" style="animation-delay:%ss"/>'
+                        % (seg, GREEN, num(trip * BIT_PITCH - 0.01, 2), num(BIT_PITCH), num(starts[i], 2)))
+        out += glow("glowS", text(560, y, value, 13, TEXT, SANS, 600, "end"))
+        if n:   # the value lights as the dot leaves the last square
+            out += ('<g class="cp-ping" opacity="0" style="animation-delay:%ss">%s</g>'
+                    % (num(starts[i] + (n + 1) * HOP, 2), glow("glowG", text(560, y, value, 13, GREEN, SANS, 600, "end"))))
     return out
+
+
+# The Pareto line draws itself: it grows from its left end at a pace set by how fast lines were being
+# written at each point, racing through a burst and crawling across quiet time, then holds, fades and grows
+# again. The loop starts partway through the hold, so the first frame, and a frozen clock, show it whole.
+GROW, GROW_HOLD, GROW_FADE, GROW_LEAD = 5.0, 6.0, 0.8, 1.5   # seconds: growing, whole, fading; whole at first
+GROW_FLOOR = 0.25    # the slowest pace, as a share of the fastest, so quiet time still moves
+GROW_WINDOW = 8      # the writing rate at a point is judged over this many samples either side of it
+GROW_EPS = 1.0       # panel units the drawn length may stray between two keyframes
+
+
+def pareto(stream, S, c):
+    """The running share of every line in the chart, from 0% at its left edge to 100% at the 0 line, laid
+    over the stream: thin and bright, no glow and no label, stepped, since lines arrive in commits.
+    Returns the line and the keyframes it grows by."""
+    ev = sorted(((a, n) for a, _, n in stream if n > 0), key=lambda e: e[0])   # youngest first
+    total = float(sum(n for _, n in ev))
+    if total <= 0:
+        return "", ""
+    ages, upto, run_sum = [a for a, _ in ev], [], 0
+    for _, n in ev:
+        run_sum += n
+        upto.append(run_sum)
+
+    def written_before(d):
+        k = bisect.bisect_right(ages, d)
+        return (total - (upto[k - 1] if k else 0)) / total
+
+    N = 480
+    days = [c * ((1 + S / c) ** (1 - i / float(N)) - 1) for i in range(N + 1)]
+    share = [written_before(d) for d in days[:-1]] + [1.0]
+    pts = [(X0 if i == 0 else x_of_age(d, S, c), T1 - (T1 - T0) * v) for i, (d, v) in enumerate(zip(days, share))]
+    # a point in the middle of a flat run adds nothing, so only the corners are kept
+    keep = [p for k, p in enumerate(pts) if k in (0, N) or p[1] != pts[k - 1][1] or p[1] != pts[k + 1][1]]
+    line = ('<polyline class="cp-grow" points="%s" fill="none" stroke="%s" stroke-width="1.3" '
+            'stroke-linejoin="round"/>' % (" ".join("%s,%s" % (num(x), num(y)) for x, y in keep), RED))
+
+    # The pace along each stretch: lines per day written around it, judged over at least a whole day so the
+    # hours just past cannot outrun everything, square-rooted so one burst does not leave the rest standing.
+    rates = []
+    for i in range(N):
+        hi, lo = days[max(0, i - GROW_WINDOW)], days[min(N, i + GROW_WINDOW + 1)]
+        if hi - lo < 1.0:
+            mid = (hi + lo) / 2
+            lo, hi = max(0.0, mid - 0.5), min(S, max(0.0, mid - 0.5) + 1.0)
+        rates.append((written_before(lo) - written_before(hi)) * total / max(hi - lo, 1e-9))
+    fastest = max(rates) or 1.0
+    marks, t, s = [(0.0, 0.0)], 0.0, 0.0
+    for i in range(N):
+        seg = math.hypot(pts[i + 1][0] - pts[i][0], pts[i + 1][1] - pts[i][1])
+        t += seg / (GROW_FLOOR + (1 - GROW_FLOOR) * math.sqrt(max(0.0, rates[i]) / fastest))
+        s += seg
+        marks.append((t, s))
+    length = s + 2   # the dash is a little longer than the line, so whole means whole
+    marks = simplify([(GROW * tt / (t or 1.0), ss) for tt, ss in marks], GROW_EPS)
+    cycle = GROW + GROW_HOLD + GROW_FADE
+    pct = lambda sec: num(100.0 * sec / cycle, 3)
+    css = ("@keyframes cp-grow{0%%{stroke-dashoffset:%s;opacity:1}%s%s%%{stroke-dashoffset:0}%s%%{opacity:1}"
+           "100%%{stroke-dashoffset:0;opacity:0}}.cp-grow{stroke-dasharray:%s %s;"
+           "animation:cp-grow %ss linear -%ss infinite}"
+           % (num(length), "".join("%s%%{stroke-dashoffset:%s}" % (pct(tt), num(length - ss)) for tt, ss in marks[1:-1]),
+              pct(GROW), pct(GROW + GROW_HOLD), num(length), num(length), num(cycle, 2),
+              num(GROW + GROW_HOLD - GROW_LEAD, 2)))
+    return line, css
+
+
+FOLD = 0.01            # a language under this share of the window's lines is drawn as Other
+EDGE_EPS = 0.03        # panel units a layer's written boundary may stray from the exact one
+VEIL_EPS = 0.004       # the veil's opacity may stray this much where a stop is left out
+MIN_CONTRAST = 1.35    # the now line gets a dark casing across any band it would nearly vanish into
 
 
 def stream_block(window, stream, column, S, c, has_history, recent_day=None):
     """The language mix on the log axis, flowing into a column for the whole window that is also the
     legend. stream: (age in days, language, lines) within the chart's span; column: every line in the
-    window, strays included."""
+    window, strays included. Returns the drawing and the Pareto line's keyframes."""
     out = label(16, 192, "language mix · share of new lines") + window_selector(window)
     if not stream:
         empty = "nothing in the last " + WINDOWS[window][1] if has_history else "no code yet"
-        return out + text(222, 300, empty, 12, MUTED, MONO, 400, "middle")
-    totals = Counter()
-    for _, lang, n in column:
-        totals[lang] += n
-    top = [lang for lang, _ in totals.most_common() if lang != OTHER][:TOP_N]
+        return out + text(222, 300, empty, 12, MUTED, MONO, 400, "middle"), ""
+    totals, small = folded(column)
+    if small:   # slivers are drawn as Other, so the legend lists only what can be seen
+        stream = [(a, OTHER if l in small else l, n) for a, l, n in stream]
+    top =[lang for lang, _ in totals.most_common() if lang != OTHER][:TOP_N]
     layers = top + ([OTHER] if any(l not in top for l in totals) else [])
     assign_colors(layers)
     amount = {lang: (sum(v for l, v in totals.items() if l not in top) if lang == OTHER else totals[lang])
@@ -1032,31 +1748,38 @@ def stream_block(window, stream, column, S, c, has_history, recent_day=None):
     xs, shares, conf, stretches = mix_along(stream, S, c, layers, top, recent_day)
     y_of = lambda v: T1 - (T1 - T0) * v
 
-    base, col_base, fills, edges, mids = [0.0] * len(xs), 0.0, "", "", []
+    # Each layer is drawn as the shape under its upper boundary, run on past the plot's left and bottom and
+    # through its ribbon into the column. Filled from the top layer down, each covers the layers above it
+    # below its own boundary, so every boundary is written once; the same shapes stroked in the background
+    # color draw the seams, and one mask trims everything to the plot. (A mask, not a clip: at a phone's
+    # fractional scale a clip would stack every layer's anti-aliased edge on the plot's bottom row.)
+    base, col_base, shapes, mids = [0.0] * len(xs), 0.0, "", []
     for j, lang in enumerate(layers):
         upper = [b + shares[j][i] for i, b in enumerate(base)]
         col_top = col_base + amount[lang] / grand
-        pts = " ".join("%d,%.1f" % (x, y_of(u)) for x, u in zip(xs, upper))
-        back = " ".join("%d,%.1f" % (x, y_of(b)) for x, b in zip(reversed(xs), reversed(base)))
-        ue, be, ct, cb = y_of(upper[-1]), y_of(base[-1]), y_of(col_top), y_of(col_base)
-        # the stream and the ribbon easing from today's mix into the column, as one shape so no
-        # anti-aliased seam shows where they meet
-        ribbon = ("C%.1f,%.1f %.1f,%.1f %.1f,%.1f L%.1f,%.1f L%.1f,%.1f L%.1f,%.1f C%.1f,%.1f %.1f,%.1f %.1f,%.1f"
-                  % (X1 + 12, ue, XC - 12, ct, XC, ct, XW, ct, XW, cb, XC, cb, XC - 12, cb, X1 + 12, be, X1, be))
-        fills += '<path d="M%s %s L%s Z" fill="%s"/>' % (pts, ribbon, back, LAYER_COLORS[lang])
-        edges += ('<polyline points="%s" stroke="%s" stroke-width="1" fill="none"/><path d="M%.1f,%.1f C%.1f,%.1f '
-                  '%.1f,%.1f %.1f,%.1f L%.1f,%.1f" stroke="%s" stroke-width="1" fill="none"/>'
-                  % (pts, BG, X1, ue, X1 + 12, ue, XC - 12, ct, XC, ct, XW, ct, BG))
-        mids.append((lang, (ct + cb) / 2, amount[lang] / grand))
+        edge = simplify([(x, y_of(u)) for x, u in zip(xs, upper)], EDGE_EPS)
+        ue, ct = y_of(upper[-1]), y_of(col_top)
+        shapes += ('<path id="cp-L%d" d="M%d,%sH%d%sC%s,%s %s,%s %d,%sH%dV%dH%dZ"/>'
+                   % (j, X0 - 6, num(edge[0][1]), X0, rel_run(edge), X1 + 12, num(ue), XC - 12, num(ct), XC,
+                      num(ct), XW + 6, T1 + 6, X0 - 6))
+        mids.append((lang, (ct + y_of(col_base)) / 2, amount[lang] / grand))
         base, col_base = upper, col_top
+    down = range(len(layers) - 1, -1, -1)
+    mix = ('<defs><mask id="cp-plot" maskUnits="userSpaceOnUse" x="0" y="0" width="%d" height="%d"><rect x="%d" '
+           'y="%d" width="%d" height="%d" fill="#fff"/></mask>%s</defs><g mask="url(#cp-plot)">%s<g fill="none" '
+           'stroke="%s">%s</g></g>'
+           % (PANEL_W, PANEL_H, X0, T0 - 1, XW - X0, T1 - T0 + 1, shapes,
+              "".join('<use href="#cp-L%d" fill="%s"/>' % (j, LAYER_COLORS[layers[j]]) for j in down), BG,
+              "".join('<use href="#cp-L%d"/>' % j for j in down)))
 
-    # the veil: the background laid over the stream, as opaque as the mix is inferred rather than seen
-    stops = "".join('<stop offset="%.4f" stop-color="%s" stop-opacity="%.3f"/>'
-                    % ((xs[i] - X0) / float(PLOT_W), BG, VEIL * (1 - conf[i]))
-                    for i in sorted(set(range(0, len(xs), 4)) | {len(xs) - 1}))
+    # the veil: the background laid over the stream, as opaque as the mix is inferred rather than seen. Its
+    # gradient runs over 1000 units, so a stop at any whole x is exact at three decimals.
+    stops = simplify([(x - X0, VEIL * (1 - cf)) for x, cf in zip(xs, conf)], VEIL_EPS)
     veil = ('<defs><linearGradient id="veil" gradientUnits="userSpaceOnUse" x1="%d" y1="0" x2="%d" y2="0">%s'
             '</linearGradient></defs><rect x="%d" y="%d" width="%d" height="%d" fill="url(#veil)"/>'
-            % (X0, X1, stops, X0, T0, PLOT_W, T1 - T0))
+            % (X0, X0 + 1000, "".join('<stop offset="%s" stop-color="%s" stop-opacity="%s"/>'
+                                      % (num(x / 1000.0, 3), BG, num(o, 3)) for x, o in stops),
+               X0, T0, PLOT_W, T1 - T0))
 
     # Legend beside the column: labels keep their band's height where they can, spread apart so none
     # collide, stay inside the plot, and an elbow leader ties each one to its band.
@@ -1076,50 +1799,137 @@ def stream_block(window, stream, column, S, c, has_history, recent_day=None):
                       text(454, ly, lang.lower(), 10.5, TEXT, MONO, 500),
                       text(560, ly, shown[lang], 10.5, MUTED, MONO, 400, "end")))
 
+    # 100%, 50% and 0% in the gutter; no rule across the plot, since the stream always covers it
     grid = "".join('<text x="34" y="%.1f" text-anchor="end" font-family="%s" font-size="8" fill="%s">%s</text>'
                    % (y_of(v) + 3, MONO, MUTED, s) for v, s in ((1, "100%"), (0.5, "50%"), (0, "0%")))
-    grid += ('<line x1="%d" y1="%.1f" x2="%d" y2="%.1f" stroke="%s" stroke-dasharray="2 4"/>'
-             % (X0, y_of(0.5), X1, y_of(0.5), LINE))
-    # the 0 line: where the dated stream ends and the ribbon into the column begins
-    zero = ('<line x1="%d" y1="%d" x2="%d" y2="%d" stroke="%s" stroke-opacity=".6"/>'
-            % (X1, T0 - 2, X1, AXIS_Y, TEXT))
+    # the 0 line: where the dated stream ends and the ribbon into the column begins. Across a band too close
+    # to its own color it gets a casing, outside the glow so the casing does not bloom.
+    alpha = ".95" if THEME["dark"] else ".6"
+    casing, b = "", 0.0
+    for j, lang in enumerate(layers):
+        v = shares[j][-1]
+        if v > 0.002 and contrast(over(TEXT, float(alpha), LAYER_COLORS[lang]), LAYER_COLORS[lang]) < MIN_CONTRAST:
+            casing += ('<line x1="%d" y1="%s" x2="%d" y2="%s" stroke="%s" stroke-opacity=".5" stroke-width="2.6"/>'
+                       % (X1, num(y_of(b + v)), X1, num(y_of(b)), BG))
+        b += v
+    zero = casing + glow("glowW", '<line x1="%d" y1="%d" x2="%d" y2="%d" stroke="%s" stroke-opacity="%s"/>'
+                         % (X1, T0 - 2, X1, AXIS_Y, TEXT, alpha))
     axis = '<line x1="%d" y1="%d" x2="%d" y2="%d" stroke="%s"/>' % (X0, AXIS_Y, X1, AXIS_Y, LINE)
     for v in pick_ticks(S, c, stretches):
         x = X0 if v == S else x_of_age(v, S, c)
-        ink = TEXT if v == 0 else MUTED   # 0 in the text color, the foot of the 0 line
+        ink = TEXT if v == 0 else MUTED   # now in the text color, the foot of the 0 line
         axis += ('<circle cx="%.1f" cy="%d" r="2.4" fill="%s"/>' % (x, AXIS_Y, ink)
                  + label(x, TICK_Y, tick_label(v, S), "start" if v == S else "middle", ink, 8))
-    axis += text(34, TICK_Y, "DAYS", 8, MUTED, MONO, 500, "end")   # untracked, so it stays in the gutter
-    return out + grid + fills + edges + veil + zero + axis + legend
+    line, grow = pareto(stream, S, c)
+    return out + grid + mix + veil + line + zero + axis + legend, grow
 
 
 # Every mark is drawn in its final state. A browser freezes the animation clock of an SVG image in a
 # background tab, and some viewers never start it, so an intro that fades or grows things in shows a
-# blank panel there. The one motion is today's bar breathing like the widget's equalizer, and it
-# starts at full opacity, so a frozen clock still shows it.
-STYLE = ("@media (prefers-reduced-motion: no-preference){"
-         "@keyframes breathe{50%{opacity:.45}}.now{animation:breathe 1.8s ease-in-out infinite}}")
+# blank panel there. Motion only adds to a finished panel: today's bar breathes like the widget's
+# equalizer, starting at full opacity; in the stats rows one dot at a time hops along a leader's squares
+# and its value lights green as the dot arrives; the Pareto line grows (see GROW). The dots and the lit
+# values rest invisible, and the Pareto line's loop starts with it whole.
+BIT_PITCH = 4.5                            # the leader's squares, apart
+HOP, HOP_REST, HOP_END = 0.12, 0.6, 3.0    # seconds: on each square, after a value lights, before the rows go again
+PING = (0.12, 1.0, 1.5)                    # seconds: a value is fully lit by, lit until, and out by
+
+
+def style_sheet(rows, grow):
+    """The panel's one style sheet, all inside prefers-reduced-motion: no-preference. Every name carries
+    the cp- prefix, since the relay puts the panel and the Spotify card in one document."""
+    trip = hop_plan(rows)[0]
+    loop = trip * HOP
+    pct = lambda sec: num(100.0 * sec / loop, 3)
+    return ("@media (prefers-reduced-motion: no-preference){"
+            "@keyframes cp-breathe{50%{opacity:.45}}.cp-now{animation:cp-breathe 1.8s ease-in-out infinite}"
+            + "@keyframes cp-hop{from{stroke-dashoffset:%s}to{stroke-dashoffset:%s}}" % (
+                num(BIT_PITCH), num(BIT_PITCH * (1 - trip), 2))
+            + ".cp-hop{animation:cp-hop %ss steps(%d) infinite}" % (num(loop, 2), trip)
+            + "@keyframes cp-ping{0%%{opacity:0}%s%%,%s%%{opacity:.9}%s%%,100%%{opacity:0}}" % (
+                pct(PING[0]), pct(PING[1]), pct(PING[2]))
+            + ".cp-ping{animation:cp-ping %ss linear infinite}" % num(loop, 2)
+            + grow + "}")
+
+
+def folded(column):
+    """Lines per language over the window, with every language under FOLD of them counted as Other, and
+    the set of languages folded."""
+    totals = Counter()
+    for _, lang, n in column:
+        totals[lang] += n
+    small = {l for l, v in totals.items() if l != OTHER and v < FOLD * sum(totals.values())}
+    for l in small:
+        totals[OTHER] += totals.pop(l)
+    return totals, small
+
+
+def words(window, new_lines, spark, rows, column, since=None):
+    """The panel's title and description for screen readers, in sentences, every number one it draws."""
+    span = "all time" if window == "all" else "the last " + WINDOWS[window][1]
+    title = "coderprint: %s new lines written, %s" % (fmt(new_lines), span)
+    phrases = {"commits · all branches": "{v} commits across all branches", "active days": "{v} active days",
+               "longest streak": "a longest streak of {v}", "current streak": "a current streak of {v}",
+               "languages written": "{v} languages written"}
+    stats = [phrases.get(name, name + " {v}").format(v=value) for name, value in rows]
+    desc = "%s new lines written (%s%s)" % ("{:,}".format(new_lines), span, ", charted since %s" % since if since else "")
+    desc += (": " + ", ".join(stats[:-1]) + (", and " if len(stats) > 1 else "") + stats[-1] + ".") if stats else "."
+    groups = bursts(spark)
+    if len(groups) > 1:
+        sizes = [fmt(g[2]) for g in groups]
+        desc += " They came in %d bursts of %s and %s lines." % (len(groups), ", ".join(sizes[:-1]), sizes[-1])
+    totals, _ = folded(column)
+    if totals:
+        top = [l for l, _ in totals.most_common() if l != OTHER][:TOP_N]
+        amount = {l: totals[l] for l in top}
+        rest = sum(v for l, v in totals.items() if l not in top)
+        if rest:
+            amount[OTHER] = rest
+        grand = float(sum(amount.values()))
+        shown = percents({l: v / grand for l, v in amount.items()})
+        desc += " Share of new lines by language: %s." % ", ".join(
+            "%s %s" % ("other languages" if l == OTHER else l, shown[l].replace("<1%", "under 1%"))
+            for l in sorted(amount, key=lambda l: (l == OTHER, -amount[l])))
+    return title, desc
+
+
+def alt_text(window, new_lines, rows):
+    """The README image's alternative text: the headline and the stats in words."""
+    title, desc = words(window, new_lines, [], rows, [])
+    return "%s; %s" % (title, desc[desc.index(": ") + 2:].rstrip(".")) if ": " in desc else title
 
 
 def panel_svg(theme, window, S, c, new_lines, spark, rows, stream, column, has_history, mark_polys, turn,
-              private, word, recent_day=None):
+              private, word, recent_day=None, since=None, commits=None):
+    """One theme's panel. since: the day the chart starts, written out (see day_label); commits: commits
+    in each of the activity bars' slices."""
     use_theme(theme)
     defs = ('<pattern id="grid" width="24" height="24" patternUnits="userSpaceOnUse"><path d="M24 0H0V24" '
-            'stroke="%s" stroke-opacity="%s" fill="none"/></pattern>' % (TEXT, THEME["grid"]))
-    caption = "normalized · by type · %seach line counted once" % ("private repos included · " if private else "")
+            'stroke="%s" stroke-opacity="%s" fill="none"/></pattern>' % (TEXT, THEME["grid"])
+            + (GLOW_DEFS if THEME["dark"] else ""))
+    caption = "%s · language by file type · each line counted once" % (
+        "public + private repos" if private else "public repos")
+    chart, grow = stream_block(window, stream, column, S, c, has_history, recent_day)
     body = (flattened_mark(mark_polys, turn)
             + theme_strip(theme)
-            + stats_block(window, S, new_lines, spark, rows)
+            + stats_block(window, S, new_lines, spark, rows, since, commits)
             + '<line x1="16" y1="176" x2="560" y2="176" stroke="%s"/>' % LINE
-            + stream_block(window, stream, column, S, c, has_history, recent_day)
+            + chart
             + label(16, 437, caption, size=7.5)
-            + wordmark(word))
+            + wordmark(word)
+            + ('<rect width="%d" height="%d" rx="10" fill="url(#vignette)"/>' % (PANEL_W, PANEL_H)
+               if THEME["dark"] else ""))
+    # the monospace stack is named once, on a group around everything, instead of on every label
+    mono = ' font-family="%s"' % MONO
+    body = "<g%s>%s</g>" % (mono, body.replace(mono, "").replace(' font-weight="400"', ""))
+    title, desc = words(window, new_lines, spark, rows, column, since)
     # the notice is an element, not a comment, so it survives when the relay merges the panel
     return ('<svg xmlns="http://www.w3.org/2000/svg" width="%d" height="%d" viewBox="0 0 %d %d" role="img" '
-            'aria-label="%s">\n<metadata>%s</metadata>\n<style>%s</style>\n<defs>%s</defs>\n'
+            'aria-labelledby="cp-title cp-desc">\n<title id="cp-title">%s</title><desc id="cp-desc">%s</desc>\n'
+            '<metadata>%s</metadata>\n<style>%s</style>\n<defs>%s</defs>\n'
             '<rect width="%d" height="%d" rx="10" fill="%s"/><rect width="%d" height="%d" rx="10" fill="url(#grid)"/>\n'
-            '%s\n</svg>\n' % (PANEL_W, PANEL_H, PANEL_W, PANEL_H, ALT, esc(NOTICE), STYLE, defs, PANEL_W, PANEL_H,
-                              BG, PANEL_W, PANEL_H, body))
+            '%s\n</svg>\n' % (PANEL_W, PANEL_H, PANEL_W, PANEL_H, esc(title), esc(desc), esc(NOTICE),
+                              style_sheet(rows, grow), defs, PANEL_W, PANEL_H, BG, PANEL_W, PANEL_H, body))
 
 
 def todays_themes(light=None, dark=None, today=None):
@@ -1213,8 +2023,13 @@ def write_all(files):
                 os.remove(tmp)
 
 
+class Stopped(BaseException):
+    """The step's time limit. A BaseException, so no best-effort handler (the profile reads) can swallow it
+    and let a stopped run carry on to write panels."""
+
+
 def stop_on_term(*_):
-    raise RuntimeError("stopped by the step's time limit")
+    raise Stopped("stopped by the step's time limit")
 
 
 def main():
@@ -1222,15 +2037,17 @@ def main():
     window, light_choice, dark_choice, uid, relay, mark_polys, turn, word = settings()
     owner = owner_login()
     light, dark = todays_themes(light_choice, dark_choice)
-    if relay:
-        block = README_MERGED.format(link=LINK, relay=relay, owner=owner, alt=ALT)
-    elif uid:
-        block = README_PAIR.format(link=LINK, alt=ALT,
-                                   spotify_dark=SPOTIFY_URL.format(uid=uid, bg=THEMES[dark]["spotify"]),
-                                   spotify_light=SPOTIFY_URL.format(uid=uid, bg=THEMES[light]["spotify"]))
-    else:
-        block = README_PANEL.format(link=LINK, alt=ALT)
-    readme = new_readme(block)   # read before any cloning, so a README problem fails early
+
+    def readme_block(alt):
+        if relay:
+            return README_MERGED.format(link=LINK, relay=relay, owner=owner, alt=alt)
+        if uid:
+            return README_PAIR.format(link=LINK, alt=alt,
+                                      spotify_dark=SPOTIFY_URL.format(uid=uid, bg=THEMES[dark]["spotify"]),
+                                      spotify_light=SPOTIFY_URL.format(uid=uid, bg=THEMES[light]["spotify"]))
+        return README_PANEL.format(link=LINK, alt=alt)
+
+    new_readme(readme_block(ALT))   # read before any cloning, so a README problem fails early
     repos = list_repositories(owner)
     private = sum(1 for r in repos if r["isPrivate"])
 
@@ -1267,10 +2084,20 @@ def main():
         S, c = float(days_back or 1), 1.0
     stream = [e for e in column if e[0] <= S]
     new_lines = sum(n for _, _, n in column)
-    spark = [0] * 52
+    spark, commits = [0] * 52, [0] * 52   # lines, and commits, in each 52nd of the chart's span
     for age, _, n in stream:
         spark[min(51, max(0, int((S - age) / S * 52)))] += n
-    active, longest, current = activity([t for t in commit_times if t >= start], now)
+    for t in commit_times:
+        age = max(0.0, (now - t) / 86400.0)
+        if age <= S:
+            commits[min(51, int((S - age) / S * 52))] += 1
+    shown = profile_offset(owner)
+    offset, seen = shown if shown else (None, None)
+    zone = local_zone(offset, profile_location(owner), now, seen)
+    if not zone_database():   # said whatever the profile shows, so the line tells a reader nothing about it
+        say("note: this Python has no time zone database (pip install tzdata), so days are counted in UTC "
+            "or at a fixed offset")
+    active, longest, current = activity([t for t in commit_times if t >= start], now, zone)
     rows = [
         ("commits · all branches", "{:,}".format(sum(1 for t in commit_times if t >= start))),
         ("active days", str(active)),
@@ -1279,10 +2106,12 @@ def main():
         ("languages written", str(len({l for _, l, _ in column if l != OTHER and l not in PROSE}))),
     ]
 
+    since = day_label(now - S * 86400, zone) if column and S >= 1 else None
+    readme = new_readme(readme_block(esc(alt_text(window, new_lines, rows))))
     panels = {"panel-light.svg": light, "panel-dark.svg": dark}
     drawn = {os.path.join(OUT_DIR, fname): panel_svg(theme, window, S, c, new_lines, spark, rows, stream, column,
                                                      bool(events), mark_polys, turn, private > 0, word,
-                                                     recent_day).encode("utf-8")
+                                                     recent_day, since, commits).encode("utf-8")
              for fname, theme in panels.items()}
     palette = lambda t: {k: THEMES[t][k] for k in ("bg", "text", "muted", "line")}
     meta = {
@@ -1316,7 +2145,7 @@ def main():
 if __name__ == "__main__":
     try:
         code = main()
-    except RuntimeError as e:
+    except (RuntimeError, Stopped) as e:
         say("failed: %s" % e)
         code = 2
     except BaseException as e:  # never let a traceback print data into a public log

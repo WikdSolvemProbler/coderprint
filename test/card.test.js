@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { afterEach, beforeEach, describe, it } from 'node:test';
 
 import handler from '../api/card.js';
-import { BAR_RULES, DEFAULT_PALETTES, spotifyUrl, svgInner } from '../lib/compose.js';
+import { BAR_RULES, DEFAULT_PALETTES, GLOW_RULES, spotifyUrl, svgInner } from '../lib/compose.js';
 import { PALETTE, PANEL_SVG, cardsJson, spotifySvg } from './fixtures.js';
 
 const USER = 'WikdSolvemProbler';
@@ -185,9 +185,16 @@ describe('the card', () => {
     const svg = await expectCard(await get(`user=${USER}&mode=dark`));
     assert.ok(svg.includes(`<rect width="896" height="445" rx="10" fill="${PALETTE.dark.bg}"/>`));
     assert.ok(svg.includes(`stroke="${PALETTE.dark.line}"`));
-    assert.ok(svg.includes(`.artist{color:${PALETTE.dark.text}!important}.song{color:${PALETTE.dark.muted}!important}${BAR_RULES}</style>`));
+    assert.ok(svg.includes(`.artist{color:${PALETTE.dark.text}!important}.song{color:${PALETTE.dark.muted}!important}${BAR_RULES}${GLOW_RULES}</style>`));
+    assert.ok(svg.includes('fill="url(#vignetteRight)"'));
     assert.ok(svg.includes('<div class="artist">Mura Masa</div>'));
     assert.doesNotMatch(svg, /Nothing playing/);
+  });
+
+  it('glows only in dark mode', async () => {
+    const svg = await expectCard(await get(`user=${USER}&mode=light`));
+    assert.ok(svg.includes(`${BAR_RULES}</style>`));
+    assert.ok(!svg.includes(GLOW_RULES) && !svg.includes('vignetteRight'));
   });
 
   it('fetches from the HEAD ref and the widget, refusing redirects, each under a deadline', async () => {

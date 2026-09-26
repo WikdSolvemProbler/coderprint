@@ -59,7 +59,7 @@ async function card(request) {
 
   if (cards === null) return failure(502, 'cards.json is unavailable or is not a JSON object.');
   if (panelText === null) return failure(502, `panel-${mode}.svg is unavailable.`);
-  const svg = buildCard(panelText, spotifyText, cards.palette);
+  const svg = buildCard(panelText, spotifyText, cards.palette, { glow: mode === 'dark' });
   if (svg === null) return failure(502, `panel-${mode}.svg is not a usable SVG document.`);
   return new Response(svg, { status: 200, headers: CARD_HEADERS });
 }
