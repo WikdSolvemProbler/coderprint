@@ -99,7 +99,7 @@ The relay serves the card at `/api/card` and nothing else: the `public` folder, 
 | `window` | `all` | The span everything covers: `all`, `10y`, `5y`, `3y`, `2y` or `12m`. The chart starts at your oldest real work inside it, so it never shows empty time. |
 | `spotify-uid` | none | Shows what you're playing on Spotify. |
 | `relay` | none | Your relay's card address, to merge panel and Spotify into one image. |
-| `mark` | none | Your own watermark, drawn faintly behind the chart: SVG path data with straight segments only, filled even-odd, up to 48 KB. Pass it from a secret (`mark: ${{ secrets.CODERPRINT_MARK }}`) so the path data never sits in your repository. It is drawn into the panel as pixels, merged with the background, so like any picture what is drawn can still be seen and traced. |
+| `mark` | none | Your own watermark, drawn faintly behind the chart: SVG path data with straight segments only, filled even-odd, up to 48 KB. Pass it from a secret (`mark: ${{ secrets.CODERPRINT_MARK }}`) so the path data never sits in your repository. It sits turned 10 degrees, as part of the panel's design. It is drawn into the panel as pixels, merged with the background, so like any picture what is drawn can still be seen and traced. |
 | `force` | `false` | Redraw even if fewer repositories are visible than last time. Otherwise the old panel is kept, since that usually means a deleted repository or a token that lost access. |
 | `commit` | `true` | Commit and push the panel and README when they change. |
 

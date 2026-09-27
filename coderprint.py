@@ -218,8 +218,10 @@ THEME = {}
 LAYER_COLORS = {}
 
 # The watermark sits behind the chart's column, 120 panel units across (scaled down further if a tall
-# or turned outline would not fit), centred here, at the angle its path data gives it.
+# or turned outline would not fit), centred here, turned MARK_TURN degrees. The angle is part of the
+# panel's design, not a setting.
 MARK_WIDTH = 120
+MARK_TURN = 10
 MARK_CENTRE = (492, 372)
 MARK_PX = 2          # raster pixels per panel unit; 2 lines them up exactly with the half-unit grid stroke
 MARK_LIMIT = (8, 8, 566, 435)   # the raster stays clear of the panel's rounded corners
@@ -1960,8 +1962,7 @@ def settings():
     if relay and not re.fullmatch(r"https://[A-Za-z0-9.-]+(/[A-Za-z0-9._/-]*)?", relay):
         raise RuntimeError("CARDS_RELAY must be a plain https address")
     data = " ".join(os.environ.get("CARDS_MARK_DATA", "").split())
-    # the watermark is drawn the way its path data lies: a mark that should sit at an angle carries it
-    return window, light, dark, uid, relay, (mark_outline(data) if data else None), 0.0, load_wordmark()
+    return window, light, dark, uid, relay, (mark_outline(data) if data else None), MARK_TURN, load_wordmark()
 
 
 def previous_meta(path):
