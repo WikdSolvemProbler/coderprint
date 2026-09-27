@@ -96,7 +96,8 @@ days then fall at the shown offset, fixed for all past days so their daylight sa
 no shown time zone, in UTC. The zone is never printed or written anywhere.
 
 Themes: the five house themes, Paper, Sepia, Sage, Oxblood and Ink, each in two versions: a lite for a
-visitor in light mode and a nite for one in dark mode. GitHub tells a README image which mode the visitor
+visitor in light mode and a nite for one in dark mode. They, the chart's colors and the wordmark come from
+design/, which is licensed apart from this code; without it the script draws in a plain grey look. GitHub tells a README image which mode the visitor
 uses (a <picture> with prefers-color-scheme), so the script draws one panel for each. One theme a day for
 everyone, the five in turn by the UTC date, drawn as its lite for light mode and its nite for dark;
 CARDS_THEME pins one theme in both. A strip at the top names all five with the drawn version's theme lit.
@@ -328,98 +329,60 @@ NAMES = {
 OTHER = "Other"
 PROSE = {"Markdown"}  # not a programming language, so it is left out of the languages-written count
 
-# The five house themes, each in two versions: a lite for a visitor in light mode and a nite for one in
-# dark mode. A theme's own name is the version it first came in, so paper, sepia and sage are lites and
-# oxblood and ink nites. The tokens are refined from the five themes as first committed: each version takes
-# one of them, keeps every tone at the same step of OKLCH lightness from the page, and moves the whole ladder
-# onto a new page, so only the page's depth and a faint undertone change. The lites are near-white stocks:
-# Paper's is the committed Paper, Sepia's and Sage's are the committed ones with their tint calmed, and
-# Oxblood's and Ink's are Paper's ladder with the theme's hue in the ink and the rules. The nites are
-# near-black, all at one depth: Paper's, Sage's and Ink's are the committed Ink's ladder and Sepia's and
-# Oxblood's the committed Oxblood's, each tinted with its theme's hue, Sage's most, a malachite black, so
-# that it reads as green beside the others; Paper's alone has none, neutral charcoal greys. "spotify" is the widget's
-# background when it is shown on its own, which only comes with white text, so a lite takes a deep tone of
-# its own ink and a nite its own page; the relay instead recolors the widget to the version drawn.
-THEMES = {
-    "paper": dict(dark=False, bg="#fbf8f5", line="#d8cfc1", text="#2a1f1a", muted="#6b5e52", dim="#a89c8c",
-                  prose="#b8ad9c", other="#cfc6b8", spotify="1e1916", grid=".05", mark=".08"),
-    "paper-nite": dict(dark=True, bg="#0d0d0d", line="#303030", text="#ececec", muted="#9f9f9f", dim="#5b5b5b",
-                       prose="#dcdcdc", other="#434343", spotify="0d0d0d", grid=".035", mark=".09"),
-    "sepia": dict(dark=False, bg="#f1e9df", line="#d7c7ab", text="#412e1d", muted="#6e5b4b", dim="#bbab8b",
-                  prose="#bbab8b", other="#cec0a2", spotify="2a2018", grid=".06", mark=".08"),
-    "sepia-nite": dict(dark=True, bg="#100c08", line="#383028", text="#ece3db", muted="#aaa096", dim="#60574e",
-                       prose="#dad0c6", other="#4d453c", spotify="100c08", grid=".035", mark=".09"),
-    "sage": dict(dark=False, bg="#e7ebe5", line="#c7cfbf", text="#212d26", muted="#59635b", dim="#9ba39b",
-                 prose="#abb3a3", other="#bfc7b7", spotify="1a201c", grid=".05", mark=".08"),
-    "sage-nite": dict(dark=True, bg="#01110a", line="#22342d", text="#e8edeb", muted="#8fa59c", dim="#4d6159",
-                      prose="#cce3d9", other="#354840", spotify="01110a", grid=".035", mark=".09"),
-    "oxblood-lite": dict(dark=False, bg="#f0e9ea", line="#d2bdc0", text="#261115", muted="#625052", dim="#a08c8e",
-                         prose="#b09c9e", other="#c9b4b7", spotify="1c1214", grid=".05", mark=".08"),
-    "oxblood": dict(dark=True, bg="#14090b", line="#3a2f30", text="#e9e3e4", muted="#ac9ea0", dim="#615557",
-                    prose="#dccecf", other="#4f4344", spotify="14090b", grid=".035", mark=".09"),
-    "ink-lite": dict(dark=False, bg="#e8ebf0", line="#bdc4cc", text="#0e1926", muted="#50565d", dim="#8c929a",
-                     prose="#9ca3ab", other="#b4bbc3", spotify="10161c", grid=".05", mark=".08"),
-    "ink": dict(dark=True, bg="#0a0d11", line="#2c3035", text="#eaecef", muted="#9ba0a6", dim="#585c61",
-                prose="#d8dde3", other="#3f4348", spotify="0a0d11", grid=".035", mark=".09"),
+# The design lives in design/, apart from this code and under its own license (design/LICENSE.md): the
+# themes (design/themes.json), the chart's colors (design/palette.json) and the wordmark
+# (design/wordmark.svg). design/README.md says how they were made. Without design/ the generator draws in a
+# plain look of its own, defined here: one grey theme in a lite and a nite, a few generic colors and no
+# wordmark. A design/ that is there but cannot be read is an error, not a card quietly drawn plain.
+DESIGN_DIR = os.path.join(HERE, "design")
+PLAIN = {
+    "order": ["plain"], "variants": {"plain": ["plain", "plain-nite"]},
+    "themes": {
+        "plain": dict(dark=False, bg="#ffffff", line="#d0d7de", text="#1f2328", muted="#59636e", dim="#8c959f",
+                      prose="#afb8c1", other="#d8dee4", spotify="1f2328", grid=".05", mark=".08"),
+        "plain-nite": dict(dark=True, bg="#010409", line="#30363d", text="#e6edf3", muted="#9198a1",
+                           dim="#6e7681", prose="#c9d1d9", other="#3d444d", spotify="010409", grid=".035",
+                           mark=".09"),
+    },
+    "green": "#2da44e", "red": "#cf222e", "colors": {},
+    "shared": {c: [] for c in ("#0969da", "#bf8700", "#8250df", "#1a7f37", "#bc4c00", "#0550ae", "#6639ba",
+                               "#57606a")},
 }
-THEME_ORDER = ["paper", "sepia", "sage", "oxblood", "ink"]   # the strip's order, and the daily turn's
-# Each theme's lite and nite, as keys of THEMES.
-VARIANTS = {"paper": ("paper", "paper-nite"), "sepia": ("sepia", "sepia-nite"), "sage": ("sage", "sage-nite"),
-            "oxblood": ("oxblood-lite", "oxblood"), "ink": ("ink-lite", "ink")}
-GREEN = "#53b14f"   # the Spotify widget's green, for the bars that echo its equalizer
-RED = "#ff2e2e"     # the Pareto line, the one bright mark on the chart
+
+
+def load_design(folder=DESIGN_DIR):
+    """design/'s themes and palette merged into one dict, or PLAIN when there is no design/ folder."""
+    if not os.path.isdir(folder):
+        return PLAIN
+    design = {}
+    for name in ("themes.json", "palette.json"):
+        try:
+            with open(os.path.join(folder, name), encoding="utf-8") as f:
+                design.update(json.load(f))
+        except (OSError, ValueError):
+            raise RuntimeError("the design in design/%s is missing or cannot be read" % name) from None
+    return design
+
+
+DESIGN = load_design()
+# Each version of a theme: a lite for a visitor in light mode and a nite for one in dark mode. "spotify" is
+# the widget's background when it is shown on its own, which only comes with white text, so a lite takes a
+# deep tone of its own ink and a nite its own page; the relay instead recolors the widget to the version.
+THEMES = {name: dict(tokens) for name, tokens in DESIGN["themes"].items()}
+THEME_ORDER = list(DESIGN["order"])   # the strip's order, and the daily turn's
+VARIANTS = {name: tuple(pair) for name, pair in DESIGN["variants"].items()}   # each theme's lite and nite
+GREEN = DESIGN["green"]   # the bars that echo the Spotify widget's equalizer
+RED = DESIGN["red"]       # the Pareto line, the one bright mark on the chart
 SANS = "-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif"   # the widget's stack
 MONO = ("'IBM Plex Mono', ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, 'Liberation Mono', "
         "monospace")
-# The house chart palette (terracotta, atlas blue, muted violet, amber, sage), then earthen extras, each
-# a distinct hue. It is the same in every theme; only prose and Other follow the theme.
-COLORS = {
-    "Rust": "#d4835c", "Python": "#7cbac4", "TypeScript": "#8a7090", "JavaScript": "#d4a530",
-    "TeX": "#9db886", "HTML": "#c45545", "CSS": "#b0768f", "PowerShell": "#5d8aa8", "Shell": "#a3a86a",
-    "YAML": "#c9a27a", "TOML": "#8f8578", "SQL": "#6aa58f", "Lean": "#e0b36a", "VBScript": "#8fb3b8",
-}
-# Every other language gets a color too, in the same muted earths and the same in every theme; a layer is
-# drawn in another only when its own would crowd a language ranked above it (assign_colors). Each reads
-# against all ten backgrounds (contrast 1.5 or more) and stands clear (CIEDE2000 12 or more) of the prose
-# and Other colors of eight versions. The lites of Oxblood and Ink are the exception: their prose and Other
-# come closer to #ad959a (2.8 from Oxblood's prose), #8898a7, #a7aabc, #deaa9d and #a2b6e1. The widely
-# written have a color of their own:
-COLORS.update({
-    "Java": "#986748", "C#": "#5f855d", "C++": "#d37e7e", "C": "#516a85", "Go": "#3d9298", "PHP": "#6875a5",
-    "Ruby": "#98545c", "Kotlin": "#8e8cba", "Swift": "#deaa9d", "Dart": "#418e7e", "Dockerfile": "#3c7079",
-    "Makefile": "#727636", "Vue": "#427762", "Scala": "#8b6a69", "Lua": "#7c8095", "R": "#779ecc",
-    "Objective-C++": "#a2b6e1", "Assembly": "#726142", "Elixir": "#b18fc4", "Haskell": "#8f4f6f", "Perl": "#e1a5be",
-    "Julia": "#b8abce", "GDScript": "#6c8c8b",
-})
-# and the rest share one, each only with languages a developer seldom writes alongside. Languages that
-# often meet (C#, TypeScript, JavaScript, HTML and CSS; C, C++, Python and Shell; Kotlin, Java and Swift;
-# Go, Rust and TypeScript, and the other usual mixes) sit at least MIN_APART apart, except five pairs of
-# the older house colors (TypeScript and CSS, Python and VBScript, JavaScript and Lean, Shell and TeX,
-# YAML and Lean), of which assign_colors moves the lower-ranked whenever both are drawn.
-SHARED = {
-    "#896026": ("M4", "GAP", "Rocq Prover", "Gleam", "Luau", "Carbon", "AMPL", "Nunjucks", "Procfile", "jq"),
-    "#a18240": (
-        "Groovy", "Batchfile", "Erlang", "Fortran", "Haml", "Hack", "WebAssembly", "Macaulay2", "Dafny", "Mojo",
-    ),
-    "#456d3f": ("Clojure", "Cython", "Nim", "MLIR", "Typst", "Idris", "AIDL", "Just", "OpenSCAD"),
-    "#3d96af": ("Emacs Lisp", "EJS", "Awk", "SystemVerilog", "Processing", "Stan", "SMT", "ReScript"),
-    "#517aa6": (
-        "Vim script", "Pug", "Stata", "Standard ML", "PureScript", "Vyper", "AppleScript", "Thrift", "Mako", "Pkl",
-    ),
-    "#8cbbe4": ("HLSL", "GraphQL", "Common Lisp", "QMake", "Alloy", "PureBasic", "XSLT", "Dhall", "Open Policy Agent"),
-    "#bb8373": ("Handlebars", "COBOL", "Apex", "Raku", "Janet", "FreeMarker", "Nushell", "NASL"),
-    "#87574a": ("Nix", "Cuda", "Mustache", "ASP.NET", "D", "Yacc", "WGSL", "Sage", "Isabelle"),
-    "#8ec1a5": ("Svelte", "Haxe", "Vala", "LLVM", "Scilab", "Hy", "Inno Setup", "CUE", "BitBake", "sed"),
-    "#a0806d": ("GLSL", "MATLAB", "Crystal", "Meson", "Lex", "Agda", "Move", "NSIS", "Forth"),
-    "#789180": ("Starlark", "Tcl", "Mermaid", "Racket", "QML", "Gnuplot", "Reason", "Pawn", "Nextflow"),
-    "#656171": ("Twig", "Astro", "Elm", "Prolog", "SAS", "Cairo", "AutoHotkey", "ANTLR", "Bicep"),
-    "#686f5f": ("Protocol Buffer", "F#", "Wolfram", "Liquid", "Go Template", "Metal", "F*", "Odin", "Earthly", "SmPL"),
-    "#8898a7": ("Gradle", "Jinja", "Blade", "OCaml", "Verilog", "RobotFramework", "Cap'n Proto", "GDB"),
-    "#a7aabc": ("ShaderLab", "Visual Basic .NET", "Solidity", "CoffeeScript", "Ada", "Fennel", "XS", "SWIG", "Jsonnet"),
-    "#ad959a": ("CMake", "HCL", "Zig", "Slim", "VHDL", "Pascal", "Gherkin", "Scheme", "Asymptote", "TLA"),
-}
+# The chart's language colors, the same in every theme; only prose and Other follow the theme. A language
+# listed in "colors" has its own; every other named language shares one of the "shared" colors, and those
+# are also the spares a layer moves to when its own color would crowd one ranked above it (assign_colors).
+COLORS = dict(DESIGN["colors"])
+SHARED = {color: tuple(langs) for color, langs in DESIGN["shared"].items()}
 COLORS.update((lang, color) for color, langs in SHARED.items() for lang in langs)
-SPARE = list(SHARED)   # what a layer may move to when its own color would crowd one above (assign_colors)
+SPARE = list(SHARED)
 MIN_APART = 12.0       # CIEDE2000: no two languages drawn together look closer than this
 # The names too long to sit beside their share in a legend, wide or compact (at 0.6 em, beside the widest
 # share, 100%), go by a shorter name their writers use there; the description for screen readers keeps the
@@ -524,9 +487,9 @@ MARK_LIMIT = (8, 8, 566, 435)   # the raster stays clear of the panel's rounded 
 MARK_MAX_CHARS = 49152          # what a GitHub secret can hold
 MARK_MAX_COORD = 1e6
 
-# The coderprint wordmark: its letters, read from wordmark.svg beside this script, whose viewBox frames
-# them, drawn in the headline's color in the bottom right corner, over the watermark.
-WORDMARK_FILE = os.path.join(HERE, "wordmark.svg")
+# The coderprint wordmark: its letters, read from design/wordmark.svg, whose viewBox frames them, drawn in
+# the headline's color in the bottom right corner, over the watermark.
+WORDMARK_FILE = os.path.join(DESIGN_DIR, "wordmark.svg")
 WORDMARK_WIDTH, WORDMARK_RIGHT, WORDMARK_BOTTOM = 118.0, 560.0, 438.0   # ends where the values end
 
 SPOTIFY_URL = ("https://spotify-github-profile.kittinanx.com/api/view?uid={uid}"
@@ -1885,8 +1848,11 @@ def flattened_mark(polys, turn):
 
 
 def load_wordmark():
-    """The wordmark's path data and frame from wordmark.svg beside this script. It ships with coderprint,
-    so a missing or unreadable file is an error, not a panel quietly drawn without it."""
+    """The wordmark's path data and frame from design/wordmark.svg, or None in the plain look, which has
+    none. When design/ is there, a missing or unreadable wordmark is an error, not a panel quietly drawn
+    without it."""
+    if not os.path.isdir(DESIGN_DIR):
+        return None
     try:
         with open(WORDMARK_FILE, encoding="utf-8") as f:
             src = f.read()
@@ -1900,7 +1866,10 @@ def load_wordmark():
 
 
 def wordmark(word):
-    """The coderprint wordmark in the bottom right corner, over the watermark, in the headline's color."""
+    """The coderprint wordmark in the bottom right corner, over the watermark, in the headline's color;
+    nothing in the plain look."""
+    if word is None:
+        return ""
     d, (bx, by, bw, bh) = word
     s = WORDMARK_WIDTH / bw
     # the glow wraps the path rather than sitting on it, so the filter is not scaled with the letters
@@ -2889,10 +2858,20 @@ def stop_on_term(*_):
     raise Stopped("stopped by the step's time limit")
 
 
+def own_card_only(owner):
+    """A card is its owner's own resume, drawn by the owner's choice. In Actions the account reported on
+    must be the one the workflow's repository belongs to, so no one runs coderprint from their repository
+    over someone else's account, an employer's over its staff's included."""
+    repo = os.environ.get("GITHUB_REPOSITORY", "")
+    if repo and repo.split("/")[0].lower() != owner.lower():
+        raise RuntimeError("coderprint draws a card only for the account whose repository it runs in")
+
+
 def main():
     signal.signal(signal.SIGTERM, stop_on_term)   # unwinds through the clean-up below instead of dying
     window, pin, music, relay, mark_polys, turn, word = settings()
     owner = owner_login()
+    own_card_only(owner)
     light, dark = todays_themes(pin)   # keys of THEMES: today's theme's lite and nite
     apple = bool(music) and music[0] == "apple_music"
 

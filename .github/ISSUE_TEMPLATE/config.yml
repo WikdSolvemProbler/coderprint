@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Report a security vulnerability privately
+    url: https://github.com/WikdSolvemProbler/coderprint/security/advisories/new
+    about: Never in a public issue. This opens a private report to the maintainer instead; SECURITY.md explains what happens next.
+  - name: Read the support guide
+    url: https://github.com/WikdSolvemProbler/coderprint/blob/main/SUPPORT.md
+    about: What helps an answer come quickly; ask with the Question form above.

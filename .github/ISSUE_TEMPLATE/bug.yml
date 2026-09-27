@@ -1,0 +1,54 @@
+name: Bugs
+description: Something coderprint does is wrong. Answer the five Ws so it can be reproduced and fixed.
+title: "Bug: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        A sentence or two per answer is enough. The rule and a worked example are in [CONTRIBUTING.md](https://github.com/WikdSolvemProbler/coderprint/blob/main/CONTRIBUTING.md).
+
+        Never paste a token, a private key, or the name of a private repository. A security problem, including a log that shows a repository name, a file path or a commit message, goes through [SECURITY.md](https://github.com/WikdSolvemProbler/coderprint/blob/main/SECURITY.md), not here.
+  - type: textarea
+    id: who
+    attributes:
+      label: Who
+      description: Who is affected, for example profile owners running the Action, visitors on phones, or people who deploy the relay.
+    validations:
+      required: true
+  - type: textarea
+    id: what
+    attributes:
+      label: What
+      description: What is wrong. Say what you expected and what happened instead.
+    validations:
+      required: true
+  - type: textarea
+    id: when
+    attributes:
+      label: When
+      description: When it happens. Give the steps that make it happen, and the coderprint version or commit your workflow uses (for example v1.1.0).
+    validations:
+      required: true
+  - type: textarea
+    id: where
+    attributes:
+      label: Where
+      description: Which files, parts of the card or settings. Name the inputs you set, leaving out any secret values.
+    validations:
+      required: true
+  - type: textarea
+    id: why
+    attributes:
+      label: Why
+      description: Why it matters, meaning the problem it causes.
+    validations:
+      required: true
+  - type: textarea
+    id: output
+    attributes:
+      label: Log or picture
+      description: Optional. The error lines from the run, or a screenshot of the card. Check them for secrets first.
+      render: text
+    validations:
+      required: false

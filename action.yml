@@ -10,7 +10,7 @@ inputs:
     description: A token that can read every repository to count, ideally from your own read-only GitHub App (see the README).
     required: true
   owner:
-    description: The account to draw for.
+    description: The account to draw for. It must be the account this repository belongs to; coderprint draws a card only for its own owner.
     default: ${{ github.repository_owner }}
   window:
     description: The span the panel covers, one of all, 10y, 5y, 3y, 2y, 12m.
