@@ -15,11 +15,17 @@ inputs:
   window:
     description: The span the panel covers, one of all, 10y, 5y, 3y, 2y, 12m.
     default: all
+  theme:
+    description: Pins one theme, one of paper, sepia, sage, oxblood, ink, drawn in its version for light mode and its version for dark. Optional; left empty, the five take turns, one a day.
+    default: ""
   spotify-uid:
-    description: Your id from the Spotify widget (spotify-github-profile.kittinanx.com), to show what you are playing beside the panel. Optional.
+    description: Your id from the Spotify widget (spotify-github-profile.kittinanx.com), to show what you are playing beside the panel. Optional; set this or apple-music-uid, not both.
+    default: ""
+  apple-music-uid:
+    description: Your uid from the Apple Music card (music-profile.rayriffy.com), to show the track you last played beside the panel. Optional; set this or spotify-uid, not both.
     default: ""
   relay:
-    description: The address of your deployed relay's card endpoint (https://<your-deployment>/api/card), which merges the panel and the Spotify card into one image. Optional.
+    description: The address of your deployed relay's card endpoint (https://<your-deployment>/api/card), which merges the panel and the music card into one image. Optional.
     default: ""
   mark:
     description: Your watermark as SVG path data with straight segments only (M, L, H, V, Z), filled even-odd, up to 48 KB. Pass it from a secret (a repository secret named CODERPRINT_MARK, for example) so the path data never sits in your repository. It is drawn into the panel as pixels merged with the background; like any picture, what is drawn can still be seen and traced. Optional.
@@ -40,7 +46,9 @@ runs:
         GH_TOKEN: ${{ inputs.token }}
         CARDS_OWNER: ${{ inputs.owner }}
         CARDS_WINDOW: ${{ inputs.window }}
+        CARDS_THEME: ${{ inputs.theme }}
         CARDS_SPOTIFY_UID: ${{ inputs.spotify-uid }}
+        CARDS_APPLE_MUSIC_UID: ${{ inputs.apple-music-uid }}
         CARDS_RELAY: ${{ inputs.relay }}
         CARDS_MARK_DATA: ${{ inputs.mark }}
         FORCE: ${{ inputs.force == 'true' && '1' || '' }}

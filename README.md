@@ -14,8 +14,9 @@ Your code's fingerprint on your GitHub profile: how much you actually wrote, how
 - **Commits** on every branch, **active days** and your **longest** and **current streak** (days with a commit, counted in your own time zone when your profile shows one, see below), and how many **languages** you wrote. One green dot at a time hops along these rows, and each number lights as the dot reaches it.
 - **The language mix over time.** Days before today run along a log scale, so last week gets room and last year still fits. Quiet stretches are veiled by how little evidence they rest on, and the mix eases across them instead of jumping. The stream flows into a column that is also the legend: your eight biggest languages by name, the rest as Other.
 - **A red Pareto line** over the stream: the running share of every line in the chart, from 0% at its left edge to 100% today. It draws itself, fast where you wrote fast and slow across quiet time.
-- **Five themes** (Paper, Sepia and Sage for light mode, Oxblood and Ink for dark). Visitors get the one matching their mode, and the choice rotates daily.
-- **What you're playing on Spotify**, optionally, merged into the same card and recolored to match it.
+- **Five themes** (Paper, Sepia, Sage, Oxblood and Ink), each drawn twice: a light version for visitors in light mode and a dark one, near-black and softly glowing, for dark mode. Everyone sees the same theme on a given day, and the five take turns daily, unless you pin one with the `theme` input.
+- **What you're playing on Spotify, or the track you last played on Apple Music**, optionally, merged into the same card in its colors.
+- **A layout for phones.** On a screen 540 CSS pixels wide or less, your README shows a compact panel instead: the same numbers, bars, chart, legend and motion, 360 wide and stacked, so nothing that must be read shrinks to a few pixels. With the relay (step 4 below) it comes merged over a strip showing your music; with a music card beside the panel and no relay, phones get the two side by side, as on a desktop.
 
 Motion only ever adds to a finished panel. A visitor whose device asks for reduced motion sees none of it, and a viewer that never starts animations still sees the whole panel. Screen readers get the numbers in words, and so does the image's alt text in your README.
 
@@ -80,11 +81,18 @@ jobs:
           force: ${{ inputs.force && 'true' || 'false' }}
 ```
 
-Run it once from the Actions tab. It writes `assets/panel-light.svg`, `assets/panel-dark.svg` and `assets/cards.json`, and puts the panel at the top of your `README.md` between two markers, `<!-- coderprint:start -->` and `<!-- coderprint:end -->`. Everything else in your README stays as it is; only the text between the markers is ever rewritten. It refreshes daily.
+Run it once from the Actions tab. It writes `assets/panel-light.svg` and `assets/panel-dark.svg`, their compact versions for phones (`assets/panel-compact-light.svg` and `assets/panel-compact-dark.svg`), `assets/cards.json` and, unless a music card sits beside the panel, an empty `assets/blank.svg`. It puts the panel at the top of your `README.md` between two markers, `<!-- coderprint:start -->` and `<!-- coderprint:end -->`. Everything else in your README stays as it is; only the text between the markers is ever rewritten. It refreshes daily.
 
-**3. Optional: Spotify.** Sign in at [spotify-github-profile.kittinanx.com](https://spotify-github-profile.kittinanx.com), copy the `uid` from the widget address it gives you, and add `spotify-uid: YOUR_UID` to the step above. The Spotify card then sits beside the panel.
+Unless a music card sits beside the panel, the markers hold two pictures, one for light mode and one for dark, and GitHub shows only the one that matches your visitor's. Each shows the compact panel on a screen 540 CSS pixels wide or less and the wide one otherwise. The empty `blank.svg` fills the other picture, so a visitor who chose a fixed theme on GitHub, rather than their device's, still sees the matching panel.
 
-**4. Optional: merge them into one card.** Two images load at two different moments, and Spotify's never matches your theme in light mode. The relay in this repository merges them into one image, recolors the Spotify card to the day's theme, and serves it from a cache so it appears at once.
+**3. Optional: Spotify or Apple Music.** Pick one; a run with both set stops with an error. The music card then sits beside the panel.
+
+- **Spotify.** Sign in at [spotify-github-profile.kittinanx.com](https://spotify-github-profile.kittinanx.com), copy the `uid` from the widget address it gives you, and add `spotify-uid: YOUR_UID` to the step above.
+- **Apple Music.** Its card has no "now playing": it shows the track you played last. Sign in with your Apple ID at [music-profile.rayriffy.com](https://music-profile.rayriffy.com). The first time, the site sends you on to `/connect`, which is a 404 page, so open [music-profile.rayriffy.com/dashboard/link](https://music-profile.rayriffy.com/dashboard/link) yourself and choose **Connect with Apple Music**. Then open [music-profile.rayriffy.com/dashboard](https://music-profile.rayriffy.com/dashboard), copy the uid from the Markdown snippet it shows (everything after `uid=`), and add `apple-music-uid: YOUR_UID` to the step above. If the card later shows an error, your Apple Music session has expired: open `/dashboard/link` and connect again.
+
+  That service is run by its author, Phumrapee Limpianchop, not by coderprint. It keeps your Apple ID email address, your Apple Music user token, an Apple refresh token and the network address you connected from; each time it draws your card it records the address that asked for it (your relay's, or without the relay GitHub's image proxy); and when it cannot read your track, its error log can hold your music token. Like the Spotify uid, your uid is public once it is in your repository, and anyone who has it can see the track you played last.
+
+**4. Optional: merge them into one card.** Two images load at two different moments, and neither music card matches your theme: Spotify's never does in light mode, and Apple Music's keeps colors of its own. The relay in this repository merges them into one image, recoloring the Spotify card to the day's theme or drawing your Apple Music track in it, and serves it from a cache so it appears at once, even though Apple Music's card takes about 4 to 6 seconds to draw.
 
 - [Deploy your own copy to Vercel](https://vercel.com/new/clone?repository-url=https%3A%2F%2Fgithub.com%2FWikdSolvemProbler%2Fcoderprint&env=CODERPRINT_USERS&envDescription=Your%20GitHub%20login) (the free Hobby plan is plenty). Vercel copies this repository into a new one under your account; keep it private, as the license requires. When GitHub asks where to install Vercel, choose **Only select repositories**: Vercel is granted the repository it creates and nothing else of yours. Set `CODERPRINT_USERS` to your GitHub login. The relay refuses anyone not on that list, so nobody else can spend your quota.
 - Add `relay: https://YOUR-PROJECT.vercel.app/api/card` to the step above, with the domain listed under your project's **Settings → Domains**. The longer per-deployment addresses Vercel also shows sit behind a Vercel login, so GitHub could not load the card from them.
@@ -97,8 +105,10 @@ The relay serves the card at `/api/card` and nothing else: the `public` folder, 
 | --- | --- | --- |
 | `token` | required | Reads your repositories. Use the App token from step 1. |
 | `window` | `all` | The span everything covers: `all`, `10y`, `5y`, `3y`, `2y` or `12m`. The chart starts at your oldest real work inside it, so it never shows empty time. |
-| `spotify-uid` | none | Shows what you're playing on Spotify. |
-| `relay` | none | Your relay's card address, to merge panel and Spotify into one image. |
+| `theme` | none | Pins one theme: `paper`, `sepia`, `sage`, `oxblood` or `ink`. Visitors in light mode still get its light version and those in dark mode its dark one. Left out, the five take turns, one a day. |
+| `spotify-uid` | none | Shows what you're playing on Spotify. Set this or `apple-music-uid`, not both. |
+| `apple-music-uid` | none | Shows the track you last played on Apple Music (step 3). Set this or `spotify-uid`, not both. |
+| `relay` | none | Your relay's card address, to merge the panel and the music card into one image. |
 | `mark` | none | Your own watermark, drawn faintly behind the chart: SVG path data with straight segments only, filled even-odd, up to 48 KB. Pass it from a secret (`mark: ${{ secrets.CODERPRINT_MARK }}`) so the path data never sits in your repository. It sits turned 10 degrees, as part of the panel's design. It is drawn into the panel as pixels, merged with the background, so like any picture what is drawn can still be seen and traced. |
 | `force` | `false` | Redraw even if fewer repositories are visible than last time. Otherwise the old panel is kept, since that usually means a deleted repository or a token that lost access. |
 | `commit` | `true` | Commit and push the panel and README when they change. |
@@ -109,7 +119,9 @@ Action logs on a public repository are public, so coderprint never prints or wri
 
 ## Credits
 
-The Spotify card is [kittinan/spotify-github-profile](https://github.com/kittinan/spotify-github-profile) by [Kittinan](https://github.com/kittinan), under the MIT License. The relay only recolors it to match your theme; everything it shows comes from that project.
+The Spotify card is [kittinan/spotify-github-profile](https://github.com/kittinan/spotify-github-profile) by [Kittinan](https://github.com/kittinan), under the MIT License. On a desktop the relay only recolors it to match your theme; on a phone it redraws the song, artist and cover in a strip of its own. What it shows comes from that project.
+
+The Apple Music track comes from [rayriffy/apple-music-github-profile](https://github.com/rayriffy/apple-music-github-profile) by Phumrapee Limpianchop ([rayriffy](https://github.com/rayriffy)), under the GNU Affero General Public License 3.0. coderprint draws its own Apple Music card from the song, artist and cover that project's card names, and copies none of that project's code.
 
 The place table, `places.tsv.gz`, is [GeoNames](https://www.geonames.org) data, trimmed to names, populations and time zones, with names folded to plain lowercase and a few common alternative names added by `tools/build_places.py`, and is licensed, like that data, under [Creative Commons Attribution 4.0](https://creativecommons.org/licenses/by/4.0/). GeoNames provides the data as is, without warranty or any representation of accuracy, timeliness or completeness.
 
