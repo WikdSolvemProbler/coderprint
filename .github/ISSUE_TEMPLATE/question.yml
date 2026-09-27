@@ -1,0 +1,25 @@
+name: Question
+description: Help installing or running coderprint, or a question about what it shows.
+title: "Question: "
+labels: ["question"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        [SUPPORT.md](https://github.com/WikdSolvemProbler/coderprint/blob/main/SUPPORT.md) says what helps an answer come quickly, and the [README](https://github.com/WikdSolvemProbler/coderprint#readme) answers most questions about the numbers.
+
+        Never paste a token, a private key, or the name of a private repository. A security problem goes through [SECURITY.md](https://github.com/WikdSolvemProbler/coderprint/blob/main/SECURITY.md), not here.
+  - type: textarea
+    id: question
+    attributes:
+      label: Question
+      description: What you want to know, or what you are trying to do.
+    validations:
+      required: true
+  - type: textarea
+    id: tried
+    attributes:
+      label: What you tried
+      description: Optional. What you did, what you expected and what happened, with the coderprint version or commit your workflow uses.
+    validations:
+      required: false

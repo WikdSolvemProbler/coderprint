@@ -1,16 +1,44 @@
+# Greets someone's first issue and first pull request with what a contribution
+# here needs. pull_request_target gives a pull request from a fork a token that
+# can comment. That is safe here only because this job never checks out or runs
+# code from the pull request: it reads the event and posts one comment.
+#
+# Every action is pinned to a full commit hash with its version beside it, so a
+# moved tag cannot change what runs.
 name: Greetings
 
-on: [pull_request_target, issues]
+on:
+  issues:
+    types: [ opened ]
+  pull_request_target:
+    types: [ opened ]
+
+permissions: {}
 
 jobs:
   greeting:
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     permissions:
       issues: write
       pull-requests: write
     steps:
-    - uses: actions/first-interaction@v1
+    # v1 is kept on purpose. v2 and v3 count a pull request as a first one
+    # whenever its author has never opened an issue, so they would greet a
+    # returning contributor's every pull request (actions/first-interaction
+    # issues 402 and 410, both open).
+    - uses: actions/first-interaction@34f15e814fe48ac9312ccf29db4e74fa767cbab7 # v1.3.0
       with:
         repo-token: ${{ secrets.GITHUB_TOKEN }}
-        issue-message: "Message that will be displayed on users' first issue"
-        pr-message: "Message that will be displayed on users' first pull request"
+        issue-message: |
+          Welcome, and thank you for your first issue on coderprint.
+
+          Every contribution here answers the five Ws (Who, What, When, Where, Why): who is affected, what happens, when it happens, where it happens (the panel, the relay or the Action) and why it matters. If your issue leaves one out, add it now; it is the quickest way to a fix.
+
+          To challenge a decision the project has already made, also say How it should work instead and give the Evidence that it would be better. [CONTRIBUTING.md](https://github.com/WikdSolvemProbler/coderprint/blob/main/CONTRIBUTING.md) explains both.
+        pr-message: |
+          Welcome, and thank you for your first pull request to coderprint.
+
+          Every contribution here answers the five Ws (Who, What, When, Where, Why): who the change is for, what it changes, when it takes effect, where in the code it lands and why it is needed. Put the answers in the description, so the review can start from them.
+
+          A pull request that challenges a decision the project has already made also needs How the new behavior works and the Evidence that it is better. [CONTRIBUTING.md](https://github.com/WikdSolvemProbler/coderprint/blob/main/CONTRIBUTING.md) explains both.

@@ -94,7 +94,7 @@ Unless a music card sits beside the panel, the markers hold two pictures, one fo
 
 **4. Optional: merge them into one card.** Two images load at two different moments, and neither music card matches your theme: Spotify's never does in light mode, and Apple Music's keeps colors of its own. The relay in this repository merges them into one image, recoloring the Spotify card to the day's theme or drawing your Apple Music track in it, and serves it from a cache so it appears at once, even though Apple Music's card takes about 4 to 6 seconds to draw.
 
-- [Deploy your own copy to Vercel](https://vercel.com/new/clone?repository-url=https%3A%2F%2Fgithub.com%2FWikdSolvemProbler%2Fcoderprint&env=CODERPRINT_USERS&envDescription=Your%20GitHub%20login) (the free Hobby plan is plenty). Vercel copies this repository into a new one under your account; keep it private, as the license requires. When GitHub asks where to install Vercel, choose **Only select repositories**: Vercel is granted the repository it creates and nothing else of yours. Set `CODERPRINT_USERS` to your GitHub login. The relay refuses anyone not on that list, so nobody else can spend your quota.
+- [Deploy your own copy to Vercel](https://vercel.com/new/clone?repository-url=https%3A%2F%2Fgithub.com%2FWikdSolvemProbler%2Fcoderprint&env=CODERPRINT_USERS&envDescription=Your%20GitHub%20login) (the free Hobby plan is plenty). Vercel copies this repository into a new one under your account; keep it private, since the design folder it copies is licensed only for coderprint's own use. When GitHub asks where to install Vercel, choose **Only select repositories**: Vercel is granted the repository it creates and nothing else of yours. Set `CODERPRINT_USERS` to your GitHub login. The relay refuses anyone not on that list, so nobody else can spend your quota.
 - Add `relay: https://YOUR-PROJECT.vercel.app/api/card` to the step above, with the domain listed under your project's **Settings → Domains**. The longer per-deployment addresses Vercel also shows sit behind a Vercel login, so GitHub could not load the card from them.
 
 The relay serves the card at `/api/card` and nothing else: the `public` folder, which holds only a `robots.txt`, is all a visitor can reach, so the rest of your copy stays private.
@@ -127,4 +127,12 @@ The place table, `places.tsv.gz`, is [GeoNames](https://www.geonames.org) data, 
 
 ## License
 
-Copyright 2026 Peter Shiller. coderprint is licensed under the [PolyForm Strict License 1.0.0](LICENSE.md): you may install and run it for noncommercial purposes, but not change it or share it. [NOTICE.md](NOTICE.md) adds one permission, to deploy a private, unmodified copy of the relay for your own profile, and reserves the name, the wordmark, the panel's design and the author's mark.
+Copyright 2026 Peter Shiller. In short:
+
+- **The code** is under the [PolyForm Noncommercial License 1.0.0](LICENSE.md): read it, run it, change it and fork it for any noncommercial purpose. [NOTICE.md](NOTICE.md) adds that anyone may use coderprint on their own profile and run their own relay, whatever their job.
+- **The design**, the themes, colors and wordmark in `design/`, is under [its own license](design/LICENSE.md): it goes unchanged with coderprint as published here. A copy that changes coderprint draws in the plain look, or in its own.
+- **Companies** need a commercial license, at a price: ask at peter.shiller@pipeeko.com. None is ever granted for running coderprint over people who have not been told.
+- **Your card is yours.** coderprint only ever reports on the account whose repository it runs in, and reading a card someone chose to publish is always fine.
+- **Contributions** come under the terms in [CONTRIBUTING.md](CONTRIBUTING.md).
+
+Why: sprawl is the opposite of integration. coderprint is one project, worth joining rather than copying, and a card is its owner's resume, never someone else's yardstick.

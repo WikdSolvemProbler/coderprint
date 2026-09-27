@@ -1,22 +1,27 @@
-# This workflow will triage pull requests and apply a label based on the
-# paths that are modified in the pull request.
+# Labels each pull request by the parts of the repository it changes, following
+# the rules in .github/labeler.yml. pull_request_target gives a pull request
+# from a fork a token that can add labels. That is safe here only because the
+# labeler never checks out or runs code from the pull request: it reads the list
+# of changed files, and the rules from the base branch.
 #
-# To use this workflow, you will need to set up a .github/labeler.yml
-# file with configuration.  For more information, see:
-# https://github.com/actions/labeler
-
+# Every action is pinned to a full commit hash with its version beside it, so a
+# moved tag cannot change what runs.
 name: Labeler
-on: [pull_request_target]
+
+on: [ pull_request_target ]
+
+permissions: {}
 
 jobs:
   label:
-
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     permissions:
       contents: read
       pull-requests: write
+      # lets the labeler create a label from .github/labeler.yml the first time
+      # it applies it; once every label there exists, this line can go
+      issues: write
 
     steps:
-    - uses: actions/labeler@v4
-      with:
-        repo-token: "${{ secrets.GITHUB_TOKEN }}"
+    - uses: actions/labeler@bf12e9b00b37c5c0ca2b87b79b2daf7891dbda13 # v7.0.0

@@ -1,10 +1,37 @@
 # Notice
 
-Copyright 2026 Peter Shiller. All rights reserved, except as licensed in [LICENSE.md](LICENSE.md) under the PolyForm Strict License 1.0.0.
+Copyright 2026 Peter Shiller. All rights reserved, except as licensed below.
 
-## Additional permission
+## What is licensed how
 
-In addition to that license, you may deploy one unmodified copy of this repository's relay (the `api` and `lib` folders) to a hosting account you control, keeping that copy private, solely so that it serves the card for your own GitHub profile. This permission does not extend to changing the relay or to making your copy available to anyone else.
+- **The code**, everything in this repository outside the `design` folder and the third-party parts below, is licensed under the PolyForm Noncommercial License 1.0.0 in [LICENSE.md](LICENSE.md), with the additional permissions below.
+- **The design**, the `design` folder (the themes, the chart's colors and the coderprint wordmark), is licensed only under [design/LICENSE.md](design/LICENSE.md). Without it, the code draws in a plain look of its own.
+- **Third-party parts** keep their own terms, set out at the end of this notice.
+
+## Why
+
+coderprint is one project. Its code is open to read, run, change and fork for any noncommercial purpose, and its look, its name and its marks belong to it, so a copy has to become something else rather than pass for coderprint. Sprawl is the opposite of integration: the way to change coderprint is to join it.
+
+A coderprint card is its owner's own resume, published by their choice. It is never an instrument for measuring people who have not been told.
+
+## Additional permissions
+
+These add to LICENSE.md; they take nothing away from it.
+
+1. **Your own profile.** Anyone may use coderprint to draw a card for their own GitHub profile and publish it there, whatever their work, their employer or their reason, including looking for work. That use is a permitted purpose under LICENSE.md.
+2. **Your own relay.** Anyone may deploy a copy of the relay, the `api` and `lib` folders, to serve the card for their own GitHub profile, and let anyone view the card it serves.
+
+## Commercial use
+
+Any other use that is not a permitted purpose under LICENSE.md, for example a company running coderprint or software built from it, needs a commercial license from Peter Shiller, at a price. Ask at peter.shiller@pipeeko.com. No license is ever granted for running coderprint, or anything built from it, over employees', contractors' or candidates' accounts or data without telling each of them first, in writing.
+
+## Contributions
+
+Contributions are accepted under the contributor terms in [CONTRIBUTING.md](CONTRIBUTING.md), which let Peter Shiller license them under these terms and under commercial licenses.
+
+## Reserved
+
+The name coderprint, the coderprint wordmark and the author's own mark (the watermark in the author's own cards, which he supplies through his own secret, not the `mark` input any installer may use for their own) are not licensed, except as design/LICENSE.md allows for the wordmark. The name and the marks identify coderprint as Peter Shiller's work.
 
 ## Third-party data
 
@@ -39,7 +66,3 @@ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 ```
-
-## Reserved
-
-The name coderprint, its wordmark (wordmark.svg), the visual design of the panel it draws, and the author's own mark are not licensed. No permission is granted to use any of them, except as they appear in the panels the software draws for your own profile.

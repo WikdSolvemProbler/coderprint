@@ -1,0 +1,66 @@
+name: Change or challenge
+description: Propose a change, or question a decision or claim in coderprint. Answer the five Ws; a challenge also gives How and Evidence.
+title: "Change: "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        A sentence or two per answer is enough. The rule, a worked example and what counts as evidence are in [CONTRIBUTING.md](https://github.com/WikdSolvemProbler/coderprint/blob/main/CONTRIBUTING.md).
+  - type: textarea
+    id: who
+    attributes:
+      label: Who
+      description: Who is affected, or who benefits.
+    validations:
+      required: true
+  - type: textarea
+    id: what
+    attributes:
+      label: What
+      description: What should change, or what is wrong.
+    validations:
+      required: true
+  - type: textarea
+    id: when
+    attributes:
+      label: When
+      description: When it happens, or when it should apply.
+    validations:
+      required: true
+  - type: textarea
+    id: where
+    attributes:
+      label: Where
+      description: Which files, parts of the card or settings.
+    validations:
+      required: true
+  - type: textarea
+    id: why
+    attributes:
+      label: Why
+      description: The reason, and the problem it solves.
+    validations:
+      required: true
+  - type: checkboxes
+    id: challenge
+    attributes:
+      label: Challenge
+      description: Check this if you question a design decision, a default, a formula, a threshold or a claim in the docs. How and Evidence are then required.
+      options:
+        - label: This issue questions a decision or claim in coderprint
+          required: false
+  - type: textarea
+    id: how
+    attributes:
+      label: How
+      description: Required for a challenge. How you suggest the logic be improved.
+    validations:
+      required: false
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Evidence
+      description: Required for a challenge. At least one source that backs the reasoning, such as a peer-reviewed research paper, a survey or systematic review, a standard or specification, official documentation, or a reproducible measurement or benchmark with the script that produced it. Give each a link or a Digital Object Identifier (DOI) and one or two sentences on what it shows and how it applies. Opinion alone is not evidence.
+    validations:
+      required: false

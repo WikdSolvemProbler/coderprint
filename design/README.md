@@ -1,0 +1,17 @@
+# coderprint's design
+
+This folder is coderprint's look, kept apart from its code and licensed apart from it ([LICENSE.md](LICENSE.md)). The code in the rest of the repository draws the card; this folder decides what it looks like. Without it, coderprint still runs and draws in a plain grey look of its own.
+
+- `themes.json`: the five house themes, Paper, Sepia, Sage, Oxblood and Ink, the order they take turns in, and each theme's two versions: a lite for a visitor in light mode and a nite for one in dark mode. A theme's own name is the version it first came in, so paper, sepia and sage are lites and oxblood and ink nites.
+- `palette.json`: the chart's colors. `green` is for the bars that echo the Spotify widget's equalizer and `red` for the Pareto line, the one bright mark on the chart. `colors` gives the house languages and the widely written ones a color of their own; every other named language shares one of the `shared` colors, each only with languages a developer seldom writes alongside, and those shared colors are also the spares a layer moves to when its own color would crowd one ranked above it.
+- `wordmark.svg`: the coderprint wordmark, drawn in the headline's color in the bottom right corner of every card.
+
+## How the themes were made
+
+The themes are refined from the five as first committed. Each version takes one of those, keeps every tone at the same step of OKLCH lightness from the page, and moves the whole ladder onto a new page, so only the page's depth and a faint undertone change. The lites are near-white stocks: Paper's is the committed Paper, Sepia's and Sage's are the committed ones with their tint calmed, and Oxblood's and Ink's are Paper's ladder with the theme's hue in the ink and the rules. The nites are near-black, all at one depth: Paper's, Sage's and Ink's are the committed Ink's ladder and Sepia's and Oxblood's the committed Oxblood's, each tinted with its theme's hue. Sage's carries the most, a malachite black, so that it reads as green beside the others; Paper's alone has none, neutral charcoal greys.
+
+A theme's `spotify` token is the Spotify widget's background when the widget is shown on its own, which only comes with white text, so a lite takes a deep tone of its own ink and a nite its own page; the relay instead recolors the widget to the version drawn.
+
+## How the chart's colors were chosen
+
+The house colors are terracotta, atlas blue, muted violet, amber and sage, then earthen extras, each a distinct hue and the same in every theme; only the prose and Other bands follow the theme. Each language color reads against all ten backgrounds (contrast 1.5 or more) and stands clear (CIEDE2000 12 or more) of the prose and Other colors of eight versions. The lites of Oxblood and Ink are the exception: their prose and Other come closer to #ad959a (2.8 from Oxblood's prose), #8898a7, #a7aabc, #deaa9d and #a2b6e1, so the generator counts the day's prose and Other as taken and moves a language that would sit beside its near twin to a spare. Languages that often meet (C#, TypeScript, JavaScript, HTML and CSS; C, C++, Python and Shell; Kotlin, Java and Swift; Go, Rust and TypeScript, and the other usual mixes) sit at least 12 apart, except five pairs of the older house colors (TypeScript and CSS, Python and VBScript, JavaScript and Lean, Shell and TeX, YAML and Lean), of which the generator moves the lower-ranked whenever both are drawn.

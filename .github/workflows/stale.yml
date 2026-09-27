@@ -1,27 +1,57 @@
-# This workflow warns and then closes issues and PRs that have had no activity for a specified amount of time.
+# Marks issues and pull requests stale after a stretch without activity, then
+# closes them if nothing changes. A comment, a new commit or the keep label
+# stops it. It runs daily at 23:33 Coordinated Universal Time (UTC).
 #
-# You can adjust the behavior by modifying this file.
-# For more information, see:
-# https://github.com/actions/stale
+# Issues: stale after 60 days, closed 14 days later.
+# Pull requests: stale after 30 days, closed 14 days later.
+#
+# Draft pull requests are not exempt: a draft that nobody touches for a month
+# is as stale as any other pull request, and it can be reopened.
+#
+# Every action is pinned to a full commit hash with its version beside it, so a
+# moved tag cannot change what runs.
 name: Mark stale issues and pull requests
 
 on:
   schedule:
   - cron: '33 23 * * *'
 
+permissions: {}
+
 jobs:
   stale:
-
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     permissions:
+      # the action keeps its progress in the Actions cache and replaces it each run
+      actions: write
       issues: write
       pull-requests: write
 
     steps:
-    - uses: actions/stale@v5
+    - uses: actions/stale@4391f3da665fdf50b6810c1a66712fb9ba21aa93 # v11.0.0
       with:
-        repo-token: ${{ secrets.GITHUB_TOKEN }}
-        stale-issue-message: 'Stale issue message'
-        stale-pr-message: 'Stale pull request message'
-        stale-issue-label: 'no-issue-activity'
-        stale-pr-label: 'no-pr-activity'
+        days-before-issue-stale: 60
+        days-before-issue-close: 14
+        days-before-pr-stale: 30
+        days-before-pr-close: 14
+        stale-issue-label: stale
+        stale-pr-label: stale
+        exempt-issue-labels: keep
+        exempt-pr-labels: keep
+        exempt-draft-pr: false
+        remove-stale-when-updated: true
+        close-issue-reason: not_planned
+        delete-branch: false
+        stale-issue-message: >-
+          This issue has had no activity for 60 days, so it is marked stale.
+          It closes in 14 days unless someone comments on it or it gets the keep label.
+        close-issue-message: >-
+          Closed after 74 days without activity. If it still matters, open a new
+          issue that answers the five Ws (Who, What, When, Where, Why) and links to this one.
+        stale-pr-message: >-
+          This pull request has had no activity for 30 days, so it is marked stale.
+          It closes in 14 days unless it is updated or gets the keep label.
+        close-pr-message: >-
+          Closed after 44 days without activity. To carry on, reopen it or open a
+          new pull request that links to this one.
