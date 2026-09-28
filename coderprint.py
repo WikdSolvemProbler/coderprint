@@ -1782,8 +1782,9 @@ SYNTAXES = {
         lit("raw", r"\[(=*)\[", "]{0}]"), Q1('"'), Q1("'"), Q1("`"))),
     "Haskell": Syntax(line=HS_LINE, blocks=(HS_BLOCK,), literals=(Q1('"'), PRIME_CHAR)),
     "Elm": Syntax(line=HS_LINE, blocks=(HS_BLOCK,), literals=(QM('"""'), Q1('"'), PRIME_CHAR)),
-    "PureScript": Syntax(line=HS_LINE, blocks=(HS_BLOCK,), literals=(lit("raw", E('"""'), '"""'), Q1('"'),
-                                                                     PRIME_CHAR)),
+    # PureScript's block comments, unlike Haskell's, do not nest
+    "PureScript": Syntax(line=HS_LINE, blocks=(Block(r"\{-", "-}", False, "any", False),), literals=(
+        lit("raw", E('"""'), '"""'), Q1('"'), PRIME_CHAR)),
     "Agda": Syntax(line=HS_LINE, blocks=(HS_BLOCK,), literals=(Q1('"'), PRIME_CHAR)),
     "Idris": Syntax(line=HS_LINE, blocks=(HS_BLOCK,), literals=(QM('"""'), Q1('"'), PRIME_CHAR)),
     "Dhall": Syntax(line=SL("--"), blocks=(blk("{-", "-}", nests=True),), literals=(
