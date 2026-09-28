@@ -665,6 +665,41 @@ d = run(["retired", "p1b"], archived=("retired",))
 check("M35", "an archived repository: 12 written, nothing of it in use, counted in code['archived']",
       (lines(d), use(d), d["code"].get("archived")) == (18, (6, 0), 1), figures(d))
 
+# the same history always gives the same figures, whatever Python's string hashing does in a run: here one block stood
+# in two files, written before the window in one and inside it in the other, and a commit moved one copy to a third
+r = new_repo("twin_blocks")
+write(r, "a.py", body("ta", 3) + body("tw", 5))
+commit(r, "a", T0)
+write(r, "b.py", body("tb", 3) + body("tw", 5))
+commit(r, "b", T0 + 10 * DAY)
+write(r, "a.py", body("ta", 3))
+write(r, "b.py", body("tb", 3))
+write(r, "c.py", body("tc", 2) + body("tw", 5))
+commit(r, "move one copy", T0 + 11 * DAY)
+probe = os.path.join(ROOT, "probe.py")
+with open(probe, "w", encoding="utf-8") as f:
+    f.write("import importlib.util, shutil, subprocess, sys, tempfile\n"
+            "spec = importlib.util.spec_from_file_location('cp', sys.argv[1])\n"
+            "cp = importlib.util.module_from_spec(spec)\n"
+            "spec.loader.exec_module(cp)\n"
+            "cp.clone = lambda o, n, d: subprocess.run(['git', 'clone', '-q', '--bare', sys.argv[2], d], check=True,\n"
+            "                                          capture_output=True)\n"
+            "cp.resolve_authors = lambda o, s: {}\n"
+            "cp.owner_identity = lambda o: {'user': True, 'id': 123, 'name': 'Owner One'}\n"
+            "cp.templates = lambda o: {}\n"
+            "cp.seed_blobs = lambda n, d: None\n"
+            "d = cp.collect('owner1', [{'name': 'x', 'isPrivate': True}], tempfile.mkdtemp(), %d)\n"
+            "c = d['code']\n"
+            "print(sum(n for _, _, n in d['events']), c['production'], c['tests'], c['traced'], c['matched'])\n"
+            % (T0 + 5 * DAY))
+outs = set()
+for seed in ("1", "2", "3"):
+    p = subprocess.run([sys.executable, probe, CP_PATH, r], capture_output=True,
+                       env=dict(os.environ, PYTHONHASHSEED=seed, PYTHONDONTWRITEBYTECODE="1"))
+    outs.add(p.stdout.decode().strip().splitlines()[-1] if p.stdout.strip() else p.stderr.decode()[-200:])
+check("SPEC", "the same history gives the same figures under three string hash seeds: %s" % sorted(outs),
+      len(outs) == 1, outs)
+
 # ---------------------------------------------------------------- the backstop: what history cannot give, text matches
 Trace = cp.Trace
 real_keep = Trace.keep

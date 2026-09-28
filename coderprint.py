@@ -3976,9 +3976,10 @@ def move_credit(pool, added, sha, files):
     same place of the same hunk), so the pool never grows and the place stays on the line that replaced the owner's,
     not on a neighbour's. A line only re-spaced hands its place to itself. The pool is keyed by (line_hash, whether
     the file it was written in is test code), a removed line taken from its own file's kind first. A version whose
-    lines were not paired hands its places on in order, to the first lines it added."""
+    lines were not paired hands its places on in order, to the first lines it added. The files are taken in the order
+    of their paths, so the same history always leaves the same pool."""
     pairing = added.get(PAIRS, {})
-    for f in files:
+    for f in sorted(files, key=lambda f: (f.path, f.blob)):
         plus, minus = added.get((sha, f.blob), NO_LINES)
         kind, pair = is_test(f.path), pairing.get((sha, f.blob))
         if pair is None:
@@ -4412,7 +4413,7 @@ def collect(owner, repos, work, since=None):
         (Trace.gone), as two Banks."""
         t = traces.get(c.repo)
         changed, gone = Bank(), Bank()
-        versions = {(c.sha, f.blob) for f in files if f.status != "D"}
+        versions = list(dict.fromkeys((c.sha, f.blob) for f in files if f.status != "D"))   # in the commit's order
         for version, bank in [(v, changed) for v in versions] + [((c.sha, DELETED), gone)]:
             minus = added.get(version, NO_LINES)[1]
             origins = t.gone.get(version) if t is not None else None
