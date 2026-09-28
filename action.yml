@@ -77,7 +77,19 @@ runs:
       shell: bash
       run: |
         branch=$(git symbolic-ref -q --short HEAD) || { echo "::error::coderprint must run on a branch, not a tag"; exit 1; }
-        git add assets README.md
+        # an organization's profile README is its .github repository's profile/README.md
+        repo=$(printf '%s' "${GITHUB_REPOSITORY#*/}" | tr '[:upper:]' '[:lower:]')
+        if [ "$repo" = .github ]; then readme=profile/README.md; else readme=README.md; fi
+        # exactly the files coderprint writes, past any .gitignore rule that would drop them silently (*.svg) or
+        # fail the step (assets/), and the old cards.json only as far as it is tracked (coderprint removes its own
+        # and writes none); nothing else, such as a temporary file
+        files=()
+        for f in "$readme" assets/panel-light.svg assets/panel-dark.svg assets/panel-compact-light.svg \
+                 assets/panel-compact-dark.svg assets/blank.svg assets/coderprint.json; do
+          if [ -f "$f" ] || git ls-files --error-unmatch -- "$f" >/dev/null 2>&1; then files+=("$f"); fi
+        done
+        if git ls-files --error-unmatch -- assets/cards.json >/dev/null 2>&1; then files+=(assets/cards.json); fi
+        git add --force -- "${files[@]}"
         if git diff --cached --quiet; then echo "no change"; exit 0; fi
         git config user.name "github-actions[bot]"
         git config user.email "41898282+github-actions[bot]@users.noreply.github.com"

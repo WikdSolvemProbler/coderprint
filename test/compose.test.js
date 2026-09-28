@@ -183,6 +183,9 @@ describe('readCards', () => {
       assert.equal(readCards(cardsJson({ uid }), 'dark').uid, null, JSON.stringify(uid));
     }
     assert.equal(readCards(cardsJson({ uid: 'a'.repeat(64) }), 'dark').uid, 'a'.repeat(64));
+    // an older account's user name, with a dot, an underscore and a hyphen, in either data file
+    assert.equal(readCards(cardsJson({ uid: 'john.doe_99-x' }), 'dark').uid, 'john.doe_99-x');
+    assert.equal(readCards(coderprintJson({ uid: 'anna-lisa' }), 'dark').uid, 'anna-lisa');
     assert.equal(readCards(JSON.stringify({ spotify: 'abc' }), 'dark').uid, null);
     assert.equal(readCards('{}', 'dark').uid, null);
   });

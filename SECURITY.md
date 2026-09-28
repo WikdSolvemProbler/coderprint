@@ -64,7 +64,7 @@ A vulnerability is a way to break one of these promises. Each is kept in the cod
 - It draws a card only for the account whose repository it runs in (`own_card_only`), so no one can run it from their repository over someone else's account.
 - It reads the owner's public profile page only from `github.com` over Hypertext Transfer Protocol Secure (HTTPS), and refuses a redirect to any other host (`GitHubOnly`).
 - The watermark is meant to come from a secret, and the Action never writes its path data to the repository. `mark_outline` accepts only straight segments, at most 48 kilobytes, with bounded coordinates.
-- It writes only the files under `assets` and the marked block of `README.md`, and commits only those.
+- It writes only its own files under `assets` and the marked block of `README.md` (`profile/README.md` in an organization's `.github` repository), each through a temporary file of a fresh name, never through a link or outside the repository (`write_all`), and commits only those, named one by one, and the removal of its own old `cards.json` (`action.yml`).
 
 **The relay**
 
@@ -81,7 +81,7 @@ A vulnerability is a way to break one of these promises. Each is kept in the cod
 - Markup that runs script, fetches an outside address, or navigates the viewer after passing the sanitizer, in any browser GitHub supports.
 - A way to make the relay serve a login outside `CODERPRINT_USERS`, fetch a host other than its three, follow a redirect, or read past its size limits.
 - A leak of a token, of the watermark's path data, or of a private repository's name, a file path or a commit message, into a log, a committed file, a served card or an error message.
-- An Action input, a repository's contents or a profile page that makes the Action run a command, write outside `assets` and the marked block of `README.md`, or push to another repository.
+- An Action input, a repository's contents or a profile page that makes the Action run a command, write outside `assets` and the marked block of the profile README, or push to another repository.
 - Setup instructions in the README that grant more access than coderprint needs, or pin a dependency with a published vulnerability.
 
 ## Out of scope
