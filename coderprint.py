@@ -24,9 +24,11 @@ most others with their literals followed (see read_lines). Prose (Markdown, TeX,
 version, read from its commit's diff as the whole version reads them (see read_added_code) and counted once, the
 first time its exact content appears in any repository or branch; a commit that only reformats many files at
 once (see sweep) adds nothing for the files whose lines still read alike. In use: the lines of code on each
-default branch today whose text the owner added, split into production and test code by where they live (see
-is_test). Copies, moves (those git does not pair as well, see moved_files), merges, branch landings and
-cross-repository imports all reuse content that already exists, so they add nothing. Only the owner's own
+default branch today that the owner wrote in the window, each written line once, traced through each line's history
+(see Trace) and matched by text only where the history cannot say, split into production and test code by where they
+live (see is_test). Copies, moves (those git does not pair as well, see moved_files, and blocks moved within a commit,
+see moved_blocks), merges, branch landings (a kept branch's squash as well, see LANDING_SHARE) and cross-repository
+imports all reuse content that already exists, so they add nothing. Only the owner's own
 commits count (see authorship); others', automation's, and a second landing of one change add nothing. A
 commit that adds more than IMPORT_FILES brand-new files of code, or a run of commits that adds them in parts
 (see import_runs), is treated as bringing in an existing codebase, not writing one: it is a commit, but adds no
@@ -42,8 +44,8 @@ extension alone, named as GitHub's Linguist names it (the legends shorten the fe
 Visual Basic .NET is vb.net there). An extension several languages share counts as Other (.h, .m, .pl, .v),
 unless one of them writes far more of it than the rest (.pm counts as Perl, .gd as GDScript); Other holds code
 only where every sharer comments compatibly (.h, .m, .fs, .v; see SHARED_CODE).
-Known limits: a merge's own conflict resolution is not counted, a line rewritten counts again, and a squash
-merge whose branch was deleted collapses its days into one.
+Known limits: a merge's own conflict resolution is not counted, and in use matches it by text; a line rewritten
+counts again; and a squash merge whose branch was deleted collapses its days into one.
 
 Window: CARDS_WINDOW picks the span the panel covers: all time, or the last 10, 5, 3 or 2 years, or 12
 months. The headline, the stats and the language column cover the whole window; a selector at the
@@ -152,7 +154,7 @@ import urllib.parse
 import urllib.request
 import zlib
 from array import array
-from collections import Counter, namedtuple
+from collections import Counter, deque, namedtuple
 
 try:
     import zoneinfo
@@ -760,7 +762,8 @@ def owner_login():
 
 def list_repositories(owner):
     """Every non-fork repository the account owns, a page of 100 at a time, bar the profile repository, with
-    whether it can be read (a disabled or locked repository is counted but never cloned)."""
+    whether it can be read (a disabled or locked repository is counted but never cloned) and whether it is archived
+    (its history is read, its head is not in use)."""
     nodes, cursor = [], None
     while True:
         page_args = {"owner": owner}
@@ -770,7 +773,8 @@ def list_repositories(owner):
           query($owner: String!, $cursor: String) { repositoryOwner(login: $owner) {
             repositories(first: 100, after: $cursor, ownerAffiliations: OWNER, isFork: false,
                          orderBy: {field: CREATED_AT, direction: ASC}) {
-              nodes { name isPrivate isDisabled isLocked } pageInfo { hasNextPage endCursor } } } }""", **page_args)
+              nodes { name isPrivate isDisabled isLocked isArchived } pageInfo { hasNextPage endCursor } } } }""",
+                   **page_args)
         if not data.get("repositoryOwner"):
             raise RuntimeError("GitHub has no account named by CARDS_OWNER")
         page = data["repositoryOwner"]["repositories"]
@@ -2563,7 +2567,13 @@ class CatFile:
 
     def get(self, blob):
         """blob's content, or None when git cannot give it."""
-        if self.failed:
+        got = self.ask(blob)
+        return got[2] if got is not None and got[1] == b"blob" else None
+
+    def ask(self, name):
+        """(object name, type, content) of what name names, a blob's id or a commit's path (commit:path), or None
+        when it names nothing or git cannot say. What git answers is always read whole, so the next answer lines up."""
+        if self.failed or "\n" in name:
             return None
         try:
             if self.proc is None:
@@ -2573,13 +2583,13 @@ class CatFile:
                 self.timer = threading.Timer(seconds, self.proc.kill)
                 self.timer.daemon = True
                 self.timer.start()
-            self.proc.stdin.write(blob.encode("ascii") + b"\n")
+            self.proc.stdin.write(name.encode("utf-8", "surrogateescape") + b"\n")
             self.proc.stdin.flush()
             header = self.proc.stdout.readline().split()
             if len(header) < 2:
                 self.failed = True
                 return None
-            if len(header) < 3 or header[1] != b"blob":
+            if len(header) != 3 or not header[2].isdigit():   # missing, or ambiguous: nothing follows
                 return None
             size = int(header[2])
             body = self.proc.stdout.read(size)
@@ -2587,7 +2597,7 @@ class CatFile:
             if len(body) != size:
                 self.failed = True
                 return None
-            return body
+            return header[0].decode("ascii", "replace"), header[1], body
         except (OSError, ValueError, RuntimeError):
             self.failed = True
             return None
@@ -2607,12 +2617,12 @@ class CatFile:
 
 
 class Version:
-    """A file version's lines, as bytes, whether it ends with a newline, and its readings by reader key: (kinds,
-    states, whether exact)."""
-    __slots__ = ("lines", "eol", "readings")
+    """A file version's lines, as bytes, whether it ends with a newline, its readings by reader key: (kinds,
+    states, whether exact), and, while its history is traced, each line's origin (see Trace), or None."""
+    __slots__ = ("lines", "eol", "readings", "origins")
 
     def __init__(self, lines, eol):
-        self.lines, self.eol, self.readings = lines, eol, {}
+        self.lines, self.eol, self.readings, self.origins = lines, eol, {}, None
 
     def text(self):
         """A function giving line i as text, decoded when asked, as git's diffs are read line by line."""
@@ -2740,6 +2750,119 @@ GENERATED_VERSION = ((), ())   # what read_added_code holds for a version of a g
 # a .js file rewritten as .ts is), those lines are what the commit moved (see moved_files).
 DELETED = "deleted"
 ALIKE = "alike"   # read_added_code's key for how alike each watched version's changed lines read (see sweep)
+PAIRS = "pairs"   # and for the removed line each added line of a watched version takes the place of (see pair_lines)
+# What a line is known to be (see Trace): an origin above 0 is the id of the line of code a file version's diff added,
+# whose fate collect decides; UNKNOWN_ORIGIN, a line history cannot place (a version read with no version before it at
+# hand, a merge's line neither parent holds); OTHER_ORIGIN, a line that is not one counted as written in the window.
+# OWN_PRODUCTION and OWN_TEST appear only in what collect decides: a line counted as written in the window, in
+# production or in test code.
+UNKNOWN_ORIGIN, OTHER_ORIGIN, OWN_PRODUCTION, OWN_TEST = 0, -1, -3, -4
+TRACE = None   # the Trace of the repository being read, set by collect around read_added_code and read_head_code
+# A moved block: at least MOVED_BLOCK consecutive lines of code a commit adds, in one hunk, each of which a line of the
+# same text the same commit removes (spacing aside) can account for. It is moved, not written, so a function moved
+# within its file or into another adds nothing; a lone brace or return added beside a deletion is no block.
+MOVED_BLOCK = 3
+
+
+class Trace:
+    """Where each line of one repository's file versions came from, read with its history (read_added_code) and looked
+    up at its head (read_head_code), so that collect can tell whose each line standing there is by its history rather
+    than by its text. Each line of code a version's diff adds gets an id of its own, from base[(commit, blob)] up in the
+    order the version's added lines are listed (read_added_code's added[(commit, blob)][0]). Every other line keeps the
+    origin it had in the version before, so a version's origins are its parent's with the diff applied: known once for
+    a blob and kept with it (Version.origins), wherever that blob appears again. A version read with no version before
+    it at hand knows only the lines it adds. gone[(commit, blob)] holds the origins of the lines of code the diff
+    removed, as added[...][1] lists them, and gone[(commit, DELETED)] those of the files the commit deleted;
+    bounds[(commit, blob)] where each hunk's added lines end, when there is more than one hunk; allocs every range of
+    ids given out, as [its first id, (commit, blob)], the key None where a second reading of one key replaced it; heads
+    the origins of the versions standing at the head, kept whatever else is let go; extra the origins of versions no
+    Version holds (UTF-16 files); seeded the file versions other accounts wrote (see collect), which the head leaves
+    out. broken is set when tracing met something it could not follow: the repository is then read as though it were
+    not traced, every line at its head left to the backstop (see collect), and its diffs still count."""
+    __slots__ = ("next", "base", "gone", "bounds", "allocs", "heads", "extra", "seeded", "broken")
+
+    def __init__(self, start=1, seeded=()):
+        self.next, self.base, self.gone, self.bounds, self.allocs = start, {}, {}, {}, []
+        self.heads, self.extra, self.seeded, self.broken = {}, {}, seeded, False
+
+    def known(self, blob, held=None):
+        """The origins already known for blob, or None."""
+        if held is not None and held.origins is not None:
+            return held.origins
+        got = self.heads.get(blob)
+        return got if got is not None else self.extra.get(blob)
+
+    def keep(self, blob, origins):
+        """Keeps a head version's origins for read_head_code, the first time they are known."""
+        if blob in self.heads and self.heads[blob] is None:
+            self.heads[blob] = origins
+
+    def allot(self, key, n):
+        """The first of n new ids for the lines of code the version key adds."""
+        first = self.next
+        self.next += n
+        was = self.base.get(key)
+        if was is not None:   # the same key read twice (two paths, one content): the earlier ids name nothing now
+            for a in self.allocs:
+                if a[0] == was and a[1] == key:
+                    a[1] = None
+        self.base[key] = first
+        self.allocs.append([first, key])
+        return first
+
+
+class Bank:
+    """Lines of code by line_hash, each with its origin, each to be taken once: what a commit removed, what an earlier
+    landing of one change wrote, what a branch wrote that the default branch has not taken yet."""
+    __slots__ = ("lines",)
+
+    def __init__(self):
+        self.lines = {}
+
+    def put(self, h, origin):
+        q = self.lines.get(h)
+        if q is None:
+            q = self.lines[h] = deque()
+        q.append(origin)
+
+    def count(self, h):
+        q = self.lines.get(h)
+        return len(q) if q else 0
+
+    def take(self, h):
+        """The origin of one line of text h, taken, or None when none is left."""
+        q = self.lines.get(h)
+        return q.popleft() if q else None
+
+    def __bool__(self):
+        return any(self.lines.values())
+
+
+def pair_lines(hunks):
+    """For each line of code a version adds, in order, the index of the removed line of code whose place it takes, or
+    -1: hunks is [(removed lines, added lines)], each line's text with its spacing collapsed. A line whose text is a
+    removed line's, anywhere in the file, takes that one's place, as a line only re-indented does, or one moved when
+    imports are sorted; the rest are paired in order within each hunk, as a renamed or re-quoted line is."""
+    removed = [t for gone, _ in hunks for t in gone]
+    came = [t for _, got in hunks for t in got]
+    free = {}
+    for i, t in enumerate(removed):
+        free.setdefault(t, deque()).append(i)
+    pair, used = array("l", [-1]) * len(came), bytearray(len(removed))
+    for j, t in enumerate(came):
+        q = free.get(t)
+        if q:
+            i = q.popleft()
+            pair[j], used[i] = i, 1
+    i0 = j0 = 0
+    for gone, got in hunks:
+        rest = [i for i in range(i0, i0 + len(gone)) if not used[i]]
+        for i, j in zip(rest, [j for j in range(j0, j0 + len(got)) if pair[j] < 0]):
+            pair[j], used[i] = i, 1
+        i0, j0 = i0 + len(gone), j0 + len(got)
+    return pair
+
+
 # A Git LFS pointer: a file kept elsewhere, whose text in the repository is three lines naming it
 LFS_SPECS = (b"https://git-lfs.github.com/spec/v1", b"https://hawser.github.com/spec/v1")
 LFS_LINE = re.compile(rb"version https://(?:git-lfs|hawser)\.github\.com/spec/v1|oid sha256:[0-9a-f]{64}|size [0-9]+|"
@@ -2826,12 +2949,29 @@ def read_added_code(repo_dir):
     A file a commit deletes has its lines of code pooled, as removed lines, under (commit, DELETED), so collect can
     tell a move git did not pair from new code (see moved_files). A Git LFS pointer holds no code (lfs_pointer). For
     each commit in SWEEP_WATCH, ALIKE holds how alike each version's changed lines read, {(commit, blob): share}
-    (see sweep). Paths are read exactly, whatever they hold (diff_path, header_paths)."""
-    added, where, marked, approximate, similar = {}, {}, set(), {}, {}
-    added[APPROXIMATE], added[ALIKE] = approximate, similar
+    (see sweep), and PAIRS which removed line each added line takes the place of (pair_lines). Paths are read exactly,
+    whatever they hold (diff_path, header_paths).
+
+    With TRACE set (see Trace), every version read also gets each line's origin: its parent's lines keep theirs, its
+    added lines new ids, and a merge's lines, made from its first parent's version, the origin of the same text in the
+    version its other parents hold at that path, or none."""
+    added, where, marked, approximate, similar, paired = {}, {}, set(), {}, {}, {}
+    added[APPROXIMATE], added[ALIKE], added[PAIRS] = approximate, similar, paired
     versions = Versions(repo_dir)
     watch = set(SWEEP_WATCH)
-    state = {"sha": None, "merge": False, "file": None, "header": False, "hunk": None, "side": None}
+    state = {"sha": None, "merge": False, "parents": [], "file": None, "header": False, "hunk": None, "side": None}
+    trace = TRACE
+    if trace is not None:   # the versions at the head, whose origins are kept whatever else is let go
+        try:
+            listing = run(["git", "-C", repo_dir, "ls-tree", "-r", "-z", "--full-tree", "HEAD"])
+        except OutOfTime:
+            raise
+        except RuntimeError:   # an empty repository, or a HEAD naming no branch: nothing stands there
+            listing = b""
+        for item in listing.split(b"\x00"):
+            meta = item.partition(b"\t")[0].split()
+            if len(meta) == 3 and meta[1] == b"blob":
+                trace.heads.setdefault(meta[2].decode("ascii", "replace"), None)
 
     def paths(f):
         """The file's old and new paths, None where it has none (created, or deleted): from its ---/+++ labels, or,
@@ -2882,21 +3022,72 @@ def read_added_code(repo_dir):
         if pairs is not None:
             share = alike_share(pairs)
             similar[key] = (0.0 if plus else 1.0) if share is None else share
+            paired[key] = pair_lines(pairs)
+
+    def carried(olds, n, edits):
+        """The origins of a version of n lines that edits [(old start, old end, new start, new end)] made from a version
+        whose lines' origins are olds (None where unknown): each line outside the edits keeps its old line's origin,
+        and each line inside them is UNKNOWN_ORIGIN until the caller says otherwise."""
+        origin = array("q", bytes(8 * n))
+        if olds is None:
+            return origin
+        o = m = 0
+        for a, b, c, d in edits:
+            if c - m != a - o or a < o:
+                return array("q", bytes(8 * n))   # edits that do not fit the old version: nothing is known
+            origin[m:c] = olds[o:a]
+            o, m = b, d
+        if n - m != len(olds) - o:
+            return array("q", bytes(8 * n))
+        origin[m:n] = olds[o:]
+        return origin
+
+    def traced(f, n, olds, edits, came_at, other_at, kept_at, gone_at, n_minus, bounds, have=None, extra=False):
+        """Records the origins of a version read (see Trace): olds, the version before's (None where unknown); edits,
+        what made one from the other (empty where the version was read whole); came_at, the new places of the lines
+        of code it adds, in order, which take new ids; other_at, of the other lines it adds; kept_at, [(new place, old
+        place)] of lines a hunk lists but keeps; gone_at, the old places of the lines of code it removes (None where
+        unknown, n_minus of them). extra: the version is one no Version holds (UTF-16). Returns the version's
+        origins."""
+        key = (state["sha"], f["new_blob"])
+        origin = carried(olds, n, edits)
+        first = trace.allot(key, len(came_at)) if came_at else 0
+        for j, i in enumerate(came_at):
+            origin[i] = first + j
+        for i in other_at:
+            origin[i] = OTHER_ORIGIN
+        for i, k in kept_at:
+            origin[i] = olds[k] if olds is not None else UNKNOWN_ORIGIN
+        if n_minus:
+            trace.gone[key] = (array("q", (olds[k] for k in gone_at)) if olds is not None and gone_at is not None
+                               else array("q", bytes(8 * n_minus)))
+        if len(bounds) > 1:
+            trace.bounds[key] = bounds
+        known = trace.known(f["new_blob"], have)
+        if known is None and len(origin) == n:
+            known = origin
+            if extra:
+                trace.extra[f["new_blob"]] = origin
+        if known is not None:
+            trace.keep(f["new_blob"], known)
+        return known
 
     def deleted(f):
         """A deleted file's lines of code, added to its commit's (commit, DELETED): read from the whole version where
-        it can be had, and from the diff's own lines otherwise."""
+        it can be had, and from the diff's own lines otherwise; with their origins, where traced."""
         path = f["old_path"]
         lang = language_of(path)
         if not counts_as_code(path, lang):
             return
         reader, rkey = reader_for(lang, path)
         old = None if f["binary"] else versions.get(f["old_blob"])
-        texts = []
+        texts, olds, at = [], None, []
         if old is not None:
             if not lfs_pointer(old.lines):
                 kinds, get = reading_of(old, reader, rkey)[0], old.text()
-                texts = [get(i) for i in range(len(old.lines)) if kinds[i] == CODE]
+                at = [i for i in range(len(old.lines)) if kinds[i] == CODE]
+                texts = [get(i) for i in at]
+                olds = old.origins if old.origins is not None and len(old.origins) == len(old.lines) else None
         else:
             data = versions.cat.get(f["old_blob"])
             text = text_of(data) if data is not None else None
@@ -2904,7 +3095,10 @@ def read_added_code(repo_dir):
                 if not (data.startswith(b"version ") and lfs_pointer(split_lines(data, b"\n")[0])):
                     lines, eol = split_lines(text, "\n")
                     kinds = read_lines(reader, lines.__getitem__, len(lines), eol)[0]
-                    texts = [lines[i] for i in range(len(lines)) if kinds[i] == CODE]
+                    at = [i for i in range(len(lines)) if kinds[i] == CODE]
+                    texts = [lines[i] for i in at]
+                    olds = trace.extra.get(f["old_blob"]) if trace is not None else None
+                    olds = olds if olds is not None and len(olds) == len(lines) else None
             elif not f["binary"] and not all(LFS_LINE.fullmatch(line) for h in f["hunks"] for line in h[4]):
                 rd = reader.fallback or reader
                 st = rd.initial
@@ -2916,30 +3110,78 @@ def read_added_code(repo_dir):
                             texts.append(t)
         pooled = added.setdefault((state["sha"], DELETED), (array("q"), array("q")))
         pooled[1].extend(line_hash(t) for t in texts)
+        if trace is not None and not trace.broken:
+            gone = trace.gone.setdefault((state["sha"], DELETED), array("q"))
+            if olds is not None:
+                gone.extend(olds[i] for i in at)
+            else:
+                gone.extend(array("q", bytes(8 * len(texts))))
 
     def hold(f, lang):
         """A merge's version of a file, made from its first parent's as a commit's is, so a commit after the merge
         finds it at hand; a merge adds no lines of its own (its branch's were counted where they were written).
-        Only a version the merge made from one at hand is kept: any other is fetched if a later commit needs it."""
+        Only a version the merge made from one at hand is kept: any other is fetched if a later commit needs it. While
+        traced, its origins are its first parent's lines' and, for the lines it brings in, the origins of the same
+        text in the version its other parents hold at that path (merged); a version whose origins are known is kept
+        for them whether or not its reading could be made from its first parent's."""
         reader, rkey = reader_for(lang, f["new_path"])
+        if f["binary"]:
+            return
         have = versions.held.get(f["new_blob"])
-        if have is not None and rkey in have.readings or f["binary"]:
+        wanted = trace is not None and not trace.broken and trace.known(f["new_blob"], have) is None
+        if have is not None and rkey in have.readings and not wanted:
             return
         old = versions.held.get(f["old_blob"]) if f["old_blob"] and f["old_blob"].strip("0") else None
         made = applied(old, f["hunks"]) if old is not None else None
-        base = old.readings.get(rkey) if old is not None else None
-        if made is None or base is None or not base[2] or blob_id(made[0], made[1], f["new_blob"]) != f["new_blob"]:
+        if made is None or blob_id(made[0], made[1], f["new_blob"]) != f["new_blob"]:
             return
-        new = Version(made[0], made[1])
-        try:
-            new.readings[rkey] = read_edited(reader, base[:2], new.text(), len(new.lines), new.eol, made[2]) + (True,)
-        except ReadFailed:
+        new = have if have is not None else Version(made[0], made[1])
+        base = old.readings.get(rkey)
+        if rkey not in new.readings and base is not None and base[2]:
+            try:
+                new.readings[rkey] = read_edited(reader, base[:2], new.text(), len(new.lines), new.eol,
+                                                 made[2]) + (True,)
+            except ReadFailed:
+                pass
+        if wanted:
+            try:
+                new.origins = merged(f, old, made)
+                trace.keep(f["new_blob"], new.origins)
+            except Exception:   # what tracing cannot follow leaves the head to the backstop, and the diffs still count
+                trace.broken = True
+        if rkey not in new.readings and new.origins is None:
             return
         versions.put(f["new_blob"], new)
 
+    def merged(f, old, made):
+        """The origins of a merge's version of a file, made from its first parent's (old) by made: the first parent's
+        lines keep theirs, and each line the merge brings in takes the origin of a line of the same text, spacing
+        aside, in the version another parent holds at that path, or none (a line of the merge's own, as a conflict's
+        resolution is, or one from a version whose origins are not known)."""
+        lines, _, edits = made
+        olds = old.origins if old.origins is not None and len(old.origins) == len(old.lines) else None
+        origin = carried(olds, len(lines), edits)
+        theirs = Bank()
+        for p in state["parents"][1:]:
+            got = versions.cat.ask("%s:%s" % (p, f["new_path"]))
+            if got is None or got[1] != b"blob":
+                continue
+            known = trace.known(got[0], versions.held.get(got[0]))
+            other = split_lines(got[2], b"\n")[0]
+            if known is None or len(known) != len(other):
+                continue
+            for line, o in zip(other, known):
+                theirs.put(line_hash(line.decode("utf-8", "replace")), o)
+        for a, b, c, d in edits:
+            for i in range(c, d):
+                o = theirs.take(line_hash(lines[i].decode("utf-8", "replace")))
+                origin[i] = UNKNOWN_ORIGIN if o is None else o
+        return origin
+
     def version_lines(f, lang, pairs):
         """(added lines' hashes, removed lines', how many added lines rest on a fallback, whether generated, and, when
-        pairs is a list, each hunk's removed and added lines of code with their spacing collapsed, for sweep)."""
+        pairs is a list, each hunk's removed and added lines of code with their spacing collapsed, for sweep). While
+        traced, the version's origins are recorded too (traced)."""
         reader, rkey = reader_for(lang, f["new_path"])
         old_path = f["old_path"] or f["new_path"]
         old_lang = language_of(old_path) or lang
@@ -2947,6 +3189,7 @@ def read_added_code(repo_dir):
         blank_old = not f["old_blob"] or not f["old_blob"].strip("0")
         if f["binary"]:
             return binary_lines(f, lang, reader, rkey, old_reader, okey, blank_old, pairs)
+        have = versions.held.get(f["new_blob"])
         old = Version([], False) if blank_old else versions.get(f["old_blob"])
         made = applied(old, f["hunks"]) if old is not None else None
         if made is not None and blob_id(made[0], made[1], f["new_blob"]) != f["new_blob"]:
@@ -2977,23 +3220,35 @@ def read_added_code(repo_dir):
                                                                   for h in f["hunks"] for line in h[4]))
         plus, minus, rough = array("q"), array("q"), 0
         old_kinds = old_get = None
+        track = trace is not None and not trace.broken
+        came_at, other_at, kept_at, gone_at, bounds = [], [], [], [], array("l")
         for h, (a, b, c, d) in zip(f["hunks"], edits or ()):
             first, came, gone = c, [], []
             if h[6] and h[4] and h[5] and h[5][0].rstrip(b"\r") == h[4][-1].rstrip(b"\r"):
                 first, b = c + 1, b - 1   # the old last line only gained its line end: not removed, not written
+                kept_at.append((c, b))
             for i in range(first, d if not new_pointer else first):
                 if kinds[i] == CODE:
                     came.append(get(i))
                     rough += not exact
+                    if track:
+                        came_at.append(i)
+                elif track:
+                    other_at.append(i)
             if b > a and not old_pointer:
                 if old_kinds is None:
                     old_get, old_kinds = old.text(), reading_of(old, old_reader, okey)[0]
-                gone = [old_get(i) for i in range(a, b) if old_kinds[i] == CODE]
+                at = [i for i in range(a, b) if old_kinds[i] == CODE]
+                gone = [old_get(i) for i in at]
+                if track:
+                    gone_at.extend(at)
             plus.extend(line_hash(t) for t in came)
             minus.extend(line_hash(t) for t in gone)
+            bounds.append(len(plus))
             if pairs is not None:
                 pairs.append(([" ".join(t.split()) for t in gone], [" ".join(t.split()) for t in came]))
         if edits is None:   # the new version read whole, as fetched: its added lines are the hunks' own
+            gone_at = None   # and what it removed cannot be placed in a version before
             for old_start, old_count, new_start, new_count, gone_lines, _, _, _ in f["hunks"]:
                 came, gone = [], []
                 c = new_start - 1 if new_count else new_start
@@ -3001,6 +3256,10 @@ def read_added_code(repo_dir):
                     if kinds[i] == CODE:
                         came.append(get(i))
                         rough += not exact
+                        if track:
+                            came_at.append(i)
+                    elif track:
+                        other_at.append(i)
                 reader_old = old_reader.fallback or old_reader
                 st = reader_old.initial if old_start <= 1 else reader_old.middle
                 for line in gone_lines if not old_pointer else ():
@@ -3010,8 +3269,20 @@ def read_added_code(repo_dir):
                         gone.append(text)
                 plus.extend(line_hash(t) for t in came)
                 minus.extend(line_hash(t) for t in gone)
+                bounds.append(len(plus))
                 if pairs is not None:
                     pairs.append(([" ".join(t.split()) for t in gone], [" ".join(t.split()) for t in came]))
+        if track:
+            olds = None
+            if edits is not None:
+                olds = array("q") if blank_old else old.origins
+                if olds is not None and len(olds) != len(old.lines):
+                    olds = None
+            try:
+                new.origins = traced(f, n, olds, edits or (), came_at, other_at, kept_at, gone_at, len(minus),
+                                     bounds, have)
+            except Exception:   # what tracing cannot follow leaves the head to the backstop, and the diffs still count
+                trace.broken = True
         # a version's first lines are read for a generator's mark unless they are the version before's, at its path
         fresh_head = edits is None or blank_old or old_path != f["new_path"] or any(c < GEN_HTML_LINES
                                                                                     for a, b, c, d in edits)
@@ -3055,14 +3326,30 @@ def read_added_code(repo_dir):
         kinds, _, exact = read_lines(reader, new_lines.__getitem__, len(new_lines), new_eol)
         old_kinds = read_lines(old_reader, old_lines.__getitem__, len(old_lines), old_eol)[0] if old_lines else b""
         plus, minus, rough = array("q"), array("q"), 0
-        for a, b, c, d in line_edits(old_lines, new_lines, repo_dir):
-            came = [new_lines[i] for i in range(c, d) if kinds[i] == CODE]
-            gone = [old_lines[i] for i in range(a, b) if old_kinds[i] == CODE]
+        edits = line_edits(old_lines, new_lines, repo_dir)
+        came_at, other_at, gone_at, bounds = [], [], [], array("l")
+        for a, b, c, d in edits:
+            got = [i for i in range(c, d) if kinds[i] == CODE]
+            at = [i for i in range(a, b) if old_kinds[i] == CODE]
+            came, gone = [new_lines[i] for i in got], [old_lines[i] for i in at]
+            came_at.extend(got)
+            other_at.extend(i for i in range(c, d) if kinds[i] != CODE)
+            gone_at.extend(at)
             plus.extend(line_hash(t) for t in came)
             minus.extend(line_hash(t) for t in gone)
+            bounds.append(len(plus))
             rough += 0 if exact else len(came)
             if pairs is not None:
                 pairs.append(([" ".join(t.split()) for t in gone], [" ".join(t.split()) for t in came]))
+        if trace is not None and not trace.broken:
+            olds = array("q") if blank_old else trace.known(f["old_blob"])
+            if old_data is None or olds is not None and len(olds) != len(old_lines):
+                olds = None
+            try:
+                traced(f, len(new_lines), olds, edits, came_at, other_at, [], gone_at, len(minus), bounds,
+                       extra=True)
+            except Exception:   # what tracing cannot follow leaves the head to the backstop, and the diffs still count
+                trace.broken = True
         return plus, minus, rough, generated_head(new_lines.__getitem__, len(new_lines), lang), pairs
 
     def handle(stream):
@@ -3071,7 +3358,7 @@ def read_added_code(repo_dir):
             if raw.startswith(b"\x00"):
                 finish()
                 ids = raw[1:].decode("ascii", "replace").split()   # the commit, then its parents
-                s.update(sha=ids[0] if ids else None, merge=len(ids) > 2, header=False)
+                s.update(sha=ids[0] if ids else None, merge=len(ids) > 2, parents=ids[1:], header=False)
                 continue
             if raw.startswith(b"diff --git "):
                 finish()
@@ -3249,22 +3536,30 @@ class Standing:
     """The lines of code standing at a head, one entry a line in the order they were read, a few bytes a line where a
     Counter of (line_hash, test) held a tuple and an entry for each: hashes, each line's line_hash; tests, 1 where it
     is test code; rough, 1 where a fallback read it (a Python file its tokenizer could not read, a Rust file whose
-    test scopes could not be read). unattributed is True when .gitattributes could not be read. items() gives the lines
-    as a Counter of (line_hash, whether test code) would."""
-    __slots__ = ("hashes", "tests", "rough", "unattributed")
+    test scopes could not be read); origins, each line's origin as its history gives it (see Trace), UNKNOWN_ORIGIN
+    where it gives none; files, (path, first line, end) for each file's lines. unattributed is True when
+    .gitattributes could not be read. items() gives the lines as a Counter of (line_hash, whether test code) would."""
+    __slots__ = ("hashes", "tests", "rough", "origins", "files", "unattributed")
 
     def __init__(self):
         self.hashes, self.tests, self.rough, self.unattributed = array("q"), bytearray(), bytearray(), False
+        self.origins, self.files = array("q"), []
 
     def __len__(self):
         return len(self.hashes)
 
-    def add(self, rows, rough):
-        """rows: (line_hash, whether test code) for each line; rough: whether a fallback read them."""
+    def add(self, rows, rough, origins=None, path=None):
+        """rows: (line_hash, whether test code) for each line; rough: whether a fallback read them; origins: each
+        one's origin, or None where none is known; path: the file they stand in."""
+        start = len(self.hashes)
         for h, t in rows:
             self.hashes.append(h)
             self.tests.append(1 if t else 0)
         self.rough.extend(bytes([1 if rough else 0]) * len(rows))
+        self.origins.extend(origins if origins is not None and len(origins) == len(rows)
+                            else array("q", bytes(8 * len(rows))))
+        if path is not None:
+            self.files.append((path, start, len(self.hashes)))
 
     def items(self):
         return Counter(zip(self.hashes, map(bool, self.tests))).items()
@@ -3277,8 +3572,12 @@ def read_head_code(repo_dir):
     (rust_test_files, with the crate roots the repository's Cargo.toml files name). Left out: what counts_as_code
     leaves out, symbolic links and submodules, Git LFS pointers, generated files (generated_output), and the paths the
     default branch's .gitattributes marks (attributed). An empty repository, or one whose HEAD names no branch, has
-    nothing standing at its head; a head that cannot be read for any other reason raises RuntimeError."""
-    head = Standing()
+    nothing standing at its head; a head that cannot be read for any other reason raises RuntimeError.
+
+    With TRACE set (see Trace), each line of code carries the origin its history gave its file version, and a file
+    version another account wrote (TRACE.seeded: a template's, or coderprint's own in a relay copy) is left out
+    whole, as it is not the owner's."""
+    head, trace = Standing(), TRACE
     try:
         run(["git", "-C", repo_dir, "rev-parse", "--quiet", "--verify", "HEAD^{tree}"])
     except RuntimeError as e:
@@ -3287,6 +3586,8 @@ def read_head_code(repo_dir):
         return head
     listing = run(["git", "-C", repo_dir, "ls-tree", "-r", "-z", "--full-tree", "HEAD"]).decode("utf-8", "replace")
     files, manifests = [], []
+    seeded = trace.seeded if trace is not None else ()
+    known_at = trace.heads if trace is not None and not trace.broken else {}   # each head version's origins
     for item in listing.split("\x00"):
         meta, _, path = item.partition("\t")
         fields = meta.split()
@@ -3323,6 +3624,8 @@ def read_head_code(repo_dir):
             if generated_head(lines.__getitem__, len(lines), lang):
                 marked.add(path)
                 continue
+            if blob in seeded:   # another account's file version: none of its lines are the owner's
+                continue
             test = is_test(path, lang)
             reader = reader_for(lang, path)[0]
             rows = None
@@ -3338,11 +3641,16 @@ def read_head_code(repo_dir):
                 kinds, _, exact = read_lines(reader, lines.__getitem__, len(lines), eol)
                 rows = [(line_hash(t), test) for t, kind in zip(lines, kinds) if kind == CODE]
                 exact = exact and lang != "Rust"
+            known = known_at.get(blob)
+            if known is not None and len(known) == len(lines):   # each line of code's origin, from its history
+                origins = array("q", (known[i] for i, kind in enumerate(kinds) if kind == CODE))
+            else:
+                origins = None
             if lang in WEB_OUTPUT:
-                web[path] = (rows, not exact)
+                web[path] = (rows, not exact, origins)
                 continue
             start = len(head)
-            head.add(rows, not exact)
+            head.add(rows, not exact, origins, path)
             if lang == "Rust":
                 rust[path] = (test, start, len(head))
         for blob, path in manifests:
@@ -3356,9 +3664,9 @@ def read_head_code(repo_dir):
     git_lines(["git", "-C", repo_dir, "cat-file", "--batch"], handle,
               feed="".join(blob + "\n" for blob in [f[0] for f in files] + [m[0] for m in manifests]).encode())
     output = generated_output(set(web), marked) if marked else set()
-    for path, (rows, rough) in web.items():
+    for path, (rows, rough, origins) in web.items():
         if path not in output:
-            head.add(rows, rough)
+            head.add(rows, rough, origins, path)
     for path in rust_test_files({p: t for p, (t, _, _) in rust.items()}, declared, roots):
         _, start, end = rust[path]   # a module compiled only in tests: its production lines are test code
         head.tests[start:end] = b"\x01" * (end - start)
@@ -3664,21 +3972,34 @@ EMPTY_BLOBS = {hashlib.sha1(b"blob 0\0").hexdigest(), hashlib.sha256(b"blob 0\0"
 
 def move_credit(pool, added, sha, files):
     """What a sweep did to files, in the pool of written lines: each written line of code it removed hands its
-    place to a line it added, so the pool never grows. A line only re-spaced hands its place to itself. The pool
-    is keyed by (line_hash, whether the file it was written in is test code), a removed line taken from its own
-    file's kind first."""
+    place to the line that took that place (pair_lines: the line of the same text, spacing aside, else the line in the
+    same place of the same hunk), so the pool never grows and the place stays on the line that replaced the owner's,
+    not on a neighbour's. A line only re-spaced hands its place to itself. The pool is keyed by (line_hash, whether
+    the file it was written in is test code), a removed line taken from its own file's kind first. A version whose
+    lines were not paired hands its places on in order, to the first lines it added."""
+    pairing = added.get(PAIRS, {})
     for f in files:
         plus, minus = added.get((sha, f.blob), NO_LINES)
-        kind, moved = is_test(f.path), 0
-        for h in minus:
-            if moved == len(plus):
-                break
-            for key in ((h, kind), (h, not kind)):
-                if pool[key] > 0:
-                    pool[key] -= 1
-                    moved += 1
+        kind, pair = is_test(f.path), pairing.get((sha, f.blob))
+        if pair is None:
+            moved = 0
+            for h in minus:
+                if moved == len(plus):
                     break
-        pool.update((h, kind) for h in plus[:moved])
+                for key in ((h, kind), (h, not kind)):
+                    if pool[key] > 0:
+                        pool[key] -= 1
+                        moved += 1
+                        break
+            pool.update((h, kind) for h in plus[:moved])
+            continue
+        for j, i in enumerate(pair):
+            if 0 <= i < len(minus) and j < len(plus):
+                for key in ((minus[i], kind), (minus[i], not kind)):
+                    if pool[key] > 0:
+                        pool[key] -= 1
+                        pool[(plus[j], kind)] += 1
+                        break
 
 
 # A file a commit adds is taken as moved from one it deletes, where git did not pair the two (see DELETED), when the
@@ -3793,19 +4114,84 @@ def spend(counter, h):
     return False
 
 
+def window_holds(t, since, now):
+    """Whether a commit made at t counts inside a window that starts at since (None, or -inf, for all time), as the run
+    reckons it at now: the one test what is written, what is in use and what an import skipped are all cut by, so
+    they can never disagree. main starts a limited window at a day's start in the owner's zone (first_day), so a day
+    is inside or outside whole; a commit dated more than FUTURE_SLACK past now has a broken clock and never counts."""
+    return (since is None or t >= since) and t <= now + FUTURE_SLACK
+
+
+# A landing: a file version on the default branch whose added lines of code are nearly all (LANDING_SHARE, among them
+# at least LANDING_LINES different lines) lines the owner's commits on another branch added to the same file and the
+# default branch has not taken yet, as a squash merge, or a rebase that reset author dates, writes them again with the
+# branch kept. They were written once, on the branch. A direct commit that shares a few common lines (a closing brace,
+# return None) with such a branch is not a landing, and counts in full. No commit says it is a squash, so this is
+# judged by the lines alone.
+LANDING_SHARE, LANDING_LINES = 0.8, 3
+
+
+def is_landing(waiting, plus):
+    """Whether the added lines of code plus land what a branch wrote to the same file (waiting, a Bank; see
+    LANDING_SHARE)."""
+    counts = Counter(plus)
+    matched = sum(min(n, waiting.count(h)) for h, n in counts.items())
+    return bool(plus) and matched >= LANDING_SHARE * len(plus) and sum(
+        1 for h in counts if waiting.count(h)) >= LANDING_LINES
+
+
+def moved_blocks(plus, places, ends, removed):
+    """What a commit moved into a file version (see MOVED_BLOCK): the runs of places (in order, of plus, the version's
+    added lines) that follow one another within a hunk (ends: where each hunk's added lines end) and are each matched
+    by a line of the same text among removed (Banks, drawn on in order), at least MOVED_BLOCK long. Takes a removed line
+    for each and returns {place: the removed line's origin}."""
+    links, run, want, starts = {}, [], Counter(), set(ends)
+
+    def close():
+        if len(run) >= MOVED_BLOCK:
+            for j in run:
+                for bank in removed:
+                    o = bank.take(plus[j])
+                    if o is not None:
+                        links[j] = o
+                        break
+        del run[:]
+        want.clear()
+
+    last = None
+    for j in places:
+        if run and (j != last + 1 or j in starts):
+            close()
+        h = plus[j]
+        if sum(bank.count(h) for bank in removed) > want[h]:
+            run.append(j)
+            want[h] += 1
+        else:
+            close()
+        last = j
+    close()
+    return links
+
+
 def collect(owner, repos, work, since=None):
     """Every counted file version as (time, language, lines of code), oldest first, plus the times of the
     owner's commits and of skipped imports, over the whole history; the window is applied afterwards. A file
     version's lines of code are the lines of code its commit's diff adds (read_added_code); for a repository
     whose diffs cannot be read, its added lines, comments and blank lines included, counted in code["unread"].
 
-    What is still in use is read at each default branch's head: every line of code there whose text matches a
-    line counted as written since the time since (all time when None), each written line matched at most once
-    across every repository, so what is in use is never more than what was written; split into production and
-    test code, each line matched first to one written in code of its own kind (see is_test), so a line common to
-    both is split by where it was written. A sweep changes the owner's lines without writing them, so each written
-    line it removes hands its place to one it adds (move_credit): a renamed line is still the owner's, and a
-    reformatted one already matches, spacing aside.
+    What is still in use is read at each default branch's head: every line of code there that the owner wrote in
+    the window, where wrote means exactly the lines counted as written by a commit inside it (window_holds: from
+    since, a day's start, or all time when None, to FUTURE_SLACK past the run's now, which is returned as "now" for
+    main to cut what is written by), each written line counted at most once across every repository, so what is in
+    use is never more than what was written; split into production and test code. Each line is traced through its
+    history (Trace): it counts when the line it came from was counted as written in the window, and a line from anyone
+    else's work, or from the owner's before the window, counts nothing, whatever its text. A sweep by anyone, a move
+    within one commit (moved_files, moved_blocks), a second landing of one change and a landing of a kept branch's
+    lines (is_landing) write nothing, and hand each line they change on to the line they leave in its place, in the
+    trace as in the pool of written lines (move_credit): a renamed line is still the owner's. A line history cannot
+    place is matched by its text, spacing aside, against the written lines no traced line took (the backstop):
+    code["traced"] and code["matched"] say how many of each. An archived repository's head is not read, and adds
+    nothing in use (code["archived"]).
 
     Only the owner's own commits count (see authorship); others', automation's and copies' add no lines and
     no commits, and their file versions count as seen, so no later commit is credited with them. A commit held by
@@ -3832,7 +4218,9 @@ def collect(owner, repos, work, since=None):
     (attributed_versions) count nowhere, and neither do generated files (generated_output). A version that counts is
     taken before the same content under a path that does not, in one commit (src/ beside dist/). A file moved to a
     new name while being edited, which git reports as deleted and added past its rename limit or similarity
-    threshold, adds only what it changed (moved_files). An import, of more than IMPORT_FILES new files of code in
+    threshold, adds only what it changed (moved_files), and a block moved within one commit adds nothing
+    (moved_blocks). A squash merge, or a rebase that reset author dates, that lands lines a kept branch already
+    wrote (is_landing) adds only what the branch did not. An import, of more than IMPORT_FILES new files of code in
     one commit or in a run of commits (import_runs), adds no lines.
 
     An empty repository, or one of tags alone, has nothing to read. A repository whose head cannot be read still
@@ -3841,11 +4229,17 @@ def collect(owner, repos, work, since=None):
     fallback (see read_added_code), numstat's counts for a repository whose diffs cannot be read among them, and
     code["approximate_in_use"] the lines in use read so, code["approximate_imports"] the lines of imports counted by
     numstat; code["attributes_unread"] counts the repositories whose .gitattributes git could not read."""
-    global RESERVE
+    global RESERVE, TRACE
+    now = time.time()   # the run's now, returned: main cuts what is written by it too (window_holds)
     all_commits, mismatched, unread, ignore = [], 0, 0, set()
     code, head = {}, {}   # by repository: what each file version adds, and what stands at the head
     skip, attributes_unread = {}, 0   # by repository: the (commit, path) its .gitattributes marks as not its own
     order = {}   # (repository, commit): its place in git's listing, children first (see read_commits)
+    traces = {}   # by repository: its Trace, where its history was read
+    line_of = {}   # by repository: the commits its default branch holds, or None where that cannot be read
+    # every range of ids the traces gave out, in order: its first id, and (repository, (commit, blob)), or None where a
+    # second reading of the same version replaced it (see Trace.allot)
+    bases, owners, next_id, archived = array("q"), [], 1, 0
     # The lookups that need no commits come first, so a run that reads until its deadline still has them, and a run
     # that could not tell the owner's code from others' stops before it reads anything (see main).
     unchecked = set()   # the lookups GitHub could not answer (UNCHECKED)
@@ -3859,8 +4253,9 @@ def collect(owner, repos, work, since=None):
                 "left_out": {}, "unchecked": sorted(unchecked), "unsure": set(), "copies": set(),
                 "authors": {"unknown": 0, "commits": 0, "refused": 0},
                 "code": {"production": 0, "tests": 0, "unread": 0, "heads_unread": 0, "approximate": [],
-                         "approximate_in_use": 0, "approximate_imports": [], "attributes_unread": 0},
-                "now": dt.datetime.now(dt.timezone.utc).timestamp()}
+                         "approximate_in_use": 0, "approximate_imports": [], "attributes_unread": 0, "traced": 0,
+                         "matched": 0, "archived": 0},
+                "now": now}
     seeded, unlisted = set(), set()   # the file versions other accounts wrote; the sources that could not be listed
     sources = {t for t in made.values() if t} | ({UPSTREAM} if owner.lower() != UPSTREAM.split("/")[0].lower() else set())
     for k, full_name in enumerate(sorted(sources)):
@@ -3885,23 +4280,42 @@ def collect(owner, repos, work, since=None):
                 marked = attributed_versions(dest, commits) if commits else set()
                 skip[i] = marked or set()
                 if commits:   # read while the clone is still on disk; each apart, so a head that cannot be read costs
-                    # no diffs. read_added_code pairs the changed lines of the commits that could be sweeps (sweep).
+                    # no diffs. read_added_code pairs the changed lines of the commits that could be sweeps (sweep),
+                    # and of those .git-blame-ignore-revs lists, and traces where every line came from (Trace).
                     SWEEP_WATCH.clear()
                     SWEEP_WATCH.update(c.sha for c in commits if could_sweep([f for f in c.files if f.added is not None
                                                                               and language_of(f.path)
                                                                               and (c.sha, f.path) not in skip[i]]))
+                    SWEEP_WATCH.update(sweeps)
+                    trace = TRACE = Trace(next_id, seeded)
                     try:
-                        code[i] = read_added_code(dest)
-                    except RuntimeError:
-                        code[i] = None
+                        try:
+                            code[i] = read_added_code(dest)
+                        except RuntimeError:
+                            code[i] = None
+                        finally:
+                            SWEEP_WATCH.clear()
+                        try:   # an archived repository is retired: its head is not in use, though its history counts
+                            head[i] = Standing() if r.get("isArchived") else read_head_code(dest)
+                        except RuntimeError:
+                            head[i] = None
                     finally:
-                        SWEEP_WATCH.clear()
-                    try:
-                        head[i] = read_head_code(dest)
+                        TRACE = None
+                    next_id = trace.next
+                    if code[i] is not None and not trace.broken:   # a broken trace leaves the head to the backstop
+                        traces[i] = trace
+                        for first, version in trace.allocs:
+                            bases.append(first)
+                            owners.append(None if version is None else (i, version))
+                    trace.heads = trace.extra = trace.allocs = None   # read into head[i] and bases; let go
+                    try:   # the commits the default branch holds; the rest sit on other branches (see LANDING_SHARE)
+                        listed = run(["git", "-C", dest, "rev-list", "HEAD"])
+                        line_of[i] = set(listed.decode("ascii", "replace").split())
                     except RuntimeError:
-                        head[i] = None
+                        line_of[i] = None
                 else:   # an empty repository, or one of tags alone: read, and nothing in it
                     code[i], head[i] = {}, Standing()
+                archived += bool(r.get("isArchived"))
                 if marked is None or getattr(head[i], "unattributed", False):
                     attributes_unread += 1
             except RuntimeError:
@@ -3928,6 +4342,7 @@ def collect(owner, repos, work, since=None):
         for i in relay:
             code.pop(i, None)
             head.pop(i, None)
+            traces.pop(i, None)
     notes = {}
     mine = authorship(owner, all_commits, identity, repos, notes)
     if identity["user"] and mine is None:
@@ -3948,13 +4363,179 @@ def collect(owner, repos, work, since=None):
         c, code.get(c.repo), skip.get(c.repo) or (), moved(c))))
     twins = {k for k, n in Counter((c.email, c.ts, c.subject) for c in all_commits).items() if n > 1}
     # keys: (address, author time, subject) -> each change counted under it, as [its lines (change_of), or None where
-    # they are unknown, and a Counter of the lines of code its landings counted as written, or None]
+    # they are unknown, a Counter of the lines of code its landings counted as written, or None, and those lines' ids
+    # by line_hash (see Trace), or None]
     seen, shas, keys = set(seeded), set(), {}
     events, commit_times, import_times, import_lines, approximate, rough_imports = [], [], [], [], [], []
     left_out = Counter()
     pool = Counter()   # the lines of code counted as written in the window, in every repository, by line_hash and
     # whether the file they were written in is test code
     holding, writing = set(), set()   # repositories with any file version, and with one not another's
+    # What collect decided for the lines of code each file version added, where traced (see Trace): (commit, blob) ->
+    # one origin for all of them, or an array of one for each: OWN_PRODUCTION or OWN_TEST for a line counted as written
+    # in the window, OTHER_ORIGIN for one that is not, and the origin of the line it carries on for a line a sweep, a
+    # move or a second landing handed on (a Bank's). first_of: blob -> (repository, (commit, blob)) of the commit that
+    # first held it, whose decision stands for every later version of the same content. touched: (repository, path) of
+    # every file the owner's counted commits changed.
+    decided, first_of, touched = {}, {}, set()
+    # (repository, path): what the owner's commits on branches other than the default wrote there, as a Bank, and the
+    # file versions they left, until the default branch lands them (see LANDING_SHARE)
+    side, side_blobs = {}, {}
+
+    def ids_of(c, f):
+        t = traces.get(c.repo)
+        return None if t is None else t.base.get((c.sha, f.blob))
+
+    def settle(c, f, n, links, kept, own):
+        """Records what was decided for the n lines of code version f of commit c added: own for the places in kept,
+        the origin links gives for the places it holds, OTHER_ORIGIN for the rest."""
+        if not n or ids_of(c, f) is None:
+            return
+        if not links and len(kept) in (0, n):
+            decided[(c.sha, f.blob)] = own if kept else OTHER_ORIGIN
+            return
+        values = array("q", [OTHER_ORIGIN]) * n
+        for j in kept:
+            values[j] = own
+        for j, o in links.items():
+            values[j] = o
+        decided[(c.sha, f.blob)] = values
+
+    def settle_all(c, files, value):
+        """Records value for every line of code the versions files of commit c added, where nothing else was."""
+        for f in files:
+            if (c.sha, f.blob) not in decided and ids_of(c, f) is not None:
+                decided[(c.sha, f.blob)] = value
+
+    def removed_banks(c, files, added):
+        """The lines of code commit c removed from files, and those of the files it deleted, with their origins
+        (Trace.gone), as two Banks."""
+        t = traces.get(c.repo)
+        changed, gone = Bank(), Bank()
+        versions = {(c.sha, f.blob) for f in files if f.status != "D"}
+        for version, bank in [(v, changed) for v in versions] + [((c.sha, DELETED), gone)]:
+            minus = added.get(version, NO_LINES)[1]
+            origins = t.gone.get(version) if t is not None else None
+            if origins is not None and len(origins) != len(minus):
+                origins = None
+            for i, h in enumerate(minus):
+                bank.put(h, origins[i] if origins is not None else UNKNOWN_ORIGIN)
+        return changed, gone
+
+    def hand_on(c, f, added):
+        """A swept version: each line it added carries the origin of the removed line whose place it took (pair_lines),
+        and adds nothing."""
+        t = traces.get(c.repo)
+        version = (c.sha, f.blob)
+        plus, minus = added.get(version, NO_LINES)
+        pair = added.get(PAIRS, {}).get(version)
+        origins = t.gone.get(version) if t is not None else None
+        links = {}
+        for j in range(len(plus)):
+            i = pair[j] if pair is not None and j < len(pair) else (j if j < len(minus) else -1)
+            if 0 <= i < len(minus):
+                links[j] = origins[i] if origins is not None and i < len(origins) else UNKNOWN_ORIGIN
+        settle(c, f, len(plus), links, (), OTHER_ORIGIN)
+
+    def take(c, fresh, swept, added, theirs, written, in_window, repeat=None, repeat_ids=None, wrote=None,
+             wrote_ids=None, on_side=False):
+        """The lines of code the fresh versions of commit c add: counted as written when written is true (the owner's
+        own commit), each traced in any case. A version it swept carries its lines on (hand_on); a file it moved from
+        one it deleted adds only what it changed, and a block it moved within or between files (moved_blocks) adds
+        nothing, each moved line carrying its origin on; so does a line an earlier landing of the same change counted
+        (repeat) or a branch wrote that this lands (is_landing). A version that counts is taken before the same content
+        under a path that does not (src/ beside dist/), whichever way the two paths sort."""
+        rough = added.get(APPROXIMATE, {}) if added is not None else {}
+        chosen = []   # [version, language, its added lines, the places still counted, {place: origin carried on}]
+        for f in sorted(fresh, key=lambda f: not counts_as_code(f.path, language_of(f.path))
+                        or (c.sha, f.path) in theirs):
+            if f.blob in seen:
+                continue
+            seen.add(f.blob)
+            lang = language_of(f.path)
+            if added is not None and f in swept:
+                hand_on(c, f, added)
+                continue
+            if not counts_as_code(f.path, lang) or f in swept or (c.sha, f.path) in theirs:
+                settle_all(c, [f], OTHER_ORIGIN)
+                continue
+            if added is None:
+                lines = f.added or 0
+                if written and lines:   # numstat's count, comments and blank lines and all
+                    approximate.append((c.ts, lines))
+                    events.append((c.ts, lang, lines))
+                continue
+            plus = added.get((c.sha, f.blob), NO_LINES)[0]
+            chosen.append([f, lang, plus, list(range(len(plus))), {}])
+        if not chosen:
+            return
+        banks, mv = None, moved(c)
+        for w in chosen:
+            f, lang, plus, places, links = w
+            if f.status == "A" and f.path in mv:   # moved here from a file this commit deleted: only its changes
+                if banks is None:
+                    banks = removed_banks(c, [x for x in c.files if x not in swept], added)
+                rest = []
+                for j in places:
+                    o = banks[1].take(plus[j])
+                    if o is None:
+                        rest.append(j)
+                    else:
+                        links[j] = o
+                w[3] = places = rest
+            if wrote is not None:
+                base = ids_of(c, f)
+                for j in places:
+                    wrote[plus[j]] += 1
+                    wrote_ids.append((plus[j], UNKNOWN_ORIGIN if base is None else base + j))
+            if repeat is not None:   # only what no earlier landing of this change counted
+                rest = []
+                for j in places:
+                    if spend(repeat, plus[j]):
+                        q = repeat_ids.get(plus[j])
+                        links[j] = q.pop() if q else UNKNOWN_ORIGIN
+                    else:
+                        rest.append(j)
+                w[3] = rest
+        if banks is None:
+            banks = removed_banks(c, [x for x in c.files if x not in swept], added)
+        if banks[0] or banks[1]:
+            t = traces.get(c.repo)
+            for w in chosen:
+                f, lang, plus, places, links = w
+                got = moved_blocks(plus, places, t.bounds.get((c.sha, f.blob), ()) if t is not None else (), banks)
+                if got:
+                    links.update(got)
+                    w[3] = [j for j in places if j not in got]
+        for f, lang, plus, places, links in chosen:
+            where = (c.repo, f.path)
+            if written and not on_side and side.get(where) and is_landing(side[where], [plus[j] for j in places]):
+                rest = []   # written once already, on its branch
+                for j in places:
+                    o = side[where].take(plus[j])
+                    if o is None:
+                        rest.append(j)
+                    else:
+                        links[j] = o
+                places = rest
+            kind = is_test(f.path, lang)
+            settle(c, f, len(plus), links, places,
+                   (OWN_TEST if kind else OWN_PRODUCTION) if written and in_window else OTHER_ORIGIN)
+            if not written:
+                continue
+            if on_side:   # waits for the default branch to land it
+                bank, base = side.setdefault(where, Bank()), ids_of(c, f)
+                for j in places:
+                    bank.put(plus[j], UNKNOWN_ORIGIN if base is None else base + j)
+                side_blobs.setdefault(where, set()).add(f.blob)
+            lines = len(places)
+            if in_window:
+                pool.update((plus[j], kind) for j in places)
+            if rough.get((c.sha, f.blob)):
+                approximate.append((c.ts, min(lines, rough[(c.sha, f.blob)])))
+            if lines:
+                events.append((c.ts, lang, lines))
+
     # commits of one second parent first: a sweep read before the lines it rewrites would hand on nothing
     for c in sorted(all_commits, key=lambda c: (c.ts, c.repo, -order[(c.repo, c.sha)])):
         if c.sha in shas:
@@ -3962,6 +4543,8 @@ def collect(owner, repos, work, since=None):
         shas.add(c.sha)
         live = [f for f in c.files if f.status != "D" and not f.blob.startswith("0000000")]
         fresh = [f for f in live if f.blob not in seen]
+        for f in fresh:
+            first_of.setdefault(f.blob, (c.repo, (c.sha, f.blob)))
         key = (c.email, c.ts, c.subject)
         added = code.get(c.repo)
         change = change_of(c, added) if key in twins else None
@@ -3972,10 +4555,29 @@ def collect(owner, repos, work, since=None):
             holding.add(c.repo)
             if not copied:
                 writing.add(c.repo)
+        main_line = line_of.get(c.repo)
+        on_side = main_line is not None and c.sha not in main_line
+        if side and main_line is not None and not on_side:
+            for f in live:   # a branch's own file version on the default branch: it landed as it was
+                if f.blob in side_blobs.get((c.repo, f.path), ()):
+                    side.pop((c.repo, f.path), None)
+                    side_blobs.pop((c.repo, f.path), None)
         theirs_commit = owned is not None and c.sha not in owned
         why = ("automation" if c.bot or (theirs_commit and c.sha in agents) else "others" if theirs_commit
                else "copied" if copied else None)
+        theirs = skip.get(c.repo) or ()
+        counted = [f for f in fresh if f.added is not None and language_of(f.path) and (c.sha, f.path) not in theirs]
+        in_window = added is not None and window_holds(c.ts, since, now)
         if why:   # seen all the same, so no later commit is credited with this content
+            if why != "copied" and added is not None:
+                # a sweep someone else ran (a formatter bot, a collaborator, the owner's own workflow) writes none of
+                # the owner's lines it touches, so they stay the owner's, as the owner's own sweep leaves them; so does
+                # a move of them
+                handed = set(c.files) if c.sha in ignore else sweep(counted, added.get(ALIKE, {}), c.sha)
+                if handed and in_window:
+                    move_credit(pool, added, c.sha, handed)
+                take(c, fresh, handed, added, theirs, False, in_window)
+            settle_all(c, fresh, OTHER_ORIGIN)   # a copy's lines are others', and so is all else they did not hand on
             seen.update(f.blob for f in fresh)
             left_out[why] += 1
             continue
@@ -3983,35 +4585,37 @@ def collect(owner, repos, work, since=None):
         # counted as written is not written again; what it adds that they did not, an amend's new file or a line a
         # conflict's resolution wrote, is new writing, under every rule below. Where either's lines are unknown there
         # is nothing to tell its new lines by, so it adds nothing.
-        record, repeat, wrote = None, None, None
+        record, repeat, repeat_ids, wrote, wrote_ids = None, None, None, None, None
         if key in twins:
             landings = [rec for rec in keys.get(key, ()) if same_change(change, rec[0])]
             if landings:
                 left_out["landed_twice"] += 1
                 if change is None or any(rec[1] is None for rec in landings):
+                    settle_all(c, fresh, UNKNOWN_ORIGIN)   # nothing to tell its lines by: the backstop decides
                     seen.update(f.blob for f in fresh)
                     continue
-                record, repeat = landings[0], Counter()
+                record, repeat, repeat_ids = landings[0], Counter(), {}
                 for rec in landings:
                     repeat |= rec[1]
+                    for h, got in rec[2].items():
+                        repeat_ids.setdefault(h, []).extend(got)
                 record[0] = record[0] | change
             else:
-                record = [change, None if change is None else Counter()]
+                record = [change, None, None] if change is None else [change, Counter(), {}]
                 keys.setdefault(key, []).append(record)
-            wrote = Counter() if record[1] is not None else None
+            if record[1] is not None:
+                wrote, wrote_ids = Counter(), []
         if repeat is None:
             commit_times.append(c.ts)
             if c.email in unknown:
                 unverified += 1
-        theirs = skip.get(c.repo) or ()
-        counted = [f for f in fresh if f.added is not None and language_of(f.path) and (c.sha, f.path) not in theirs]
+        touched.update((c.repo, f.path) for f in c.files)
         # the import rule counts new files of code only: prose, data, generated files and files moved from ones the
         # commit deletes are not new code (see IMPORT_FILES and moved_files)
         code_files = [f for f in counted if counts_as_code(f.path, language_of(f.path))
                       and (added is None or added.get((c.sha, f.blob)) is not GENERATED_VERSION)]
         brought = c.sha not in ignore and (c.sha in parts or len(new_code_files(c, added, theirs, moved(c), counted))
                                            > IMPORT_FILES)
-        in_window = added is not None and (since is None or c.ts >= since)
         if c.sha in ignore or brought:
             if repeat is not None:
                 pass   # its first landing already brought it in, or handed its lines on
@@ -4026,70 +4630,153 @@ def collect(owner, repos, work, since=None):
                 import_lines.append((c.ts, lines))
             elif in_window:
                 move_credit(pool, added, c.sha, c.files)
+            if not brought and added is not None:   # a listed sweep: each line it changed keeps its origin
+                take(c, fresh, set(c.files), added, theirs, False, in_window)
+            settle_all(c, fresh, OTHER_ORIGIN)   # an import's lines were not written
             seen.update(f.blob for f in fresh)
             continue
         swept = sweep(counted, added.get(ALIKE, {}) if added is not None else None, c.sha)
         if in_window and swept and repeat is None:
             move_credit(pool, added, c.sha, swept)
-        rough = added.get(APPROXIMATE, {}) if added is not None else {}
-        gone = Counter(added.get((c.sha, DELETED), NO_LINES)[1]) if added is not None and moved(c) else None
-        # a version that counts is taken before the same content under a path that does not (src/ beside dist/),
-        # whichever way the two paths sort
-        for f in sorted(fresh, key=lambda f: not counts_as_code(f.path, language_of(f.path))
-                        or (c.sha, f.path) in theirs):
-            if f.blob in seen:
-                continue
-            seen.add(f.blob)
-            lang = language_of(f.path)
-            if not counts_as_code(f.path, lang) or f in swept or (c.sha, f.path) in theirs:
-                continue
-            if added is None:
-                lines = f.added or 0
-                if lines:   # numstat's count, comments and blank lines and all
-                    approximate.append((c.ts, lines))
-            else:
-                plus = added.get((c.sha, f.blob), NO_LINES)[0]
-                if gone is not None and f.status == "A" and f.path in moved(c):
-                    plus = moved_out(plus, gone)   # moved here from a file this commit deleted: only its changes
-                if wrote is not None:
-                    wrote.update(plus)
-                if repeat is not None:   # only what no earlier landing of this change counted
-                    plus = [h for h in plus if not spend(repeat, h)]
-                lines = len(plus)
-                if in_window:
-                    kind = is_test(f.path, lang)
-                    pool.update((h, kind) for h in plus)
-                if rough.get((c.sha, f.blob)):
-                    approximate.append((c.ts, min(lines, rough[(c.sha, f.blob)])))
-            if lines:
-                events.append((c.ts, lang, lines))
+        if repeat is not None and side and main_line is not None and not on_side and added is not None:
+            for f in fresh:   # the same change landed on the default branch: what its side landing left is taken
+                waiting = side.get((c.repo, f.path))
+                if waiting:
+                    for h in added.get((c.sha, f.blob), NO_LINES)[0]:
+                        waiting.take(h)
+        take(c, fresh, swept, added, theirs, True, in_window, repeat, repeat_ids, wrote, wrote_ids, on_side)
         if wrote:
             record[1] |= wrote
-    # what still stands: each line of code at a head that matches a written line not already taken, one written in
-    # code of its own kind (production or tests) first, so a line common to both, such as a lone brace, is split by
-    # where it was written rather than by which file sorts first; the totals are the same either way. A line a
-    # fallback read is matched before one read exactly, so approximate_in_use says how many of those in use it
-    # could be. A repository whose diffs could not be read adds nothing in use.
+            for h, o in wrote_ids:
+                record[2].setdefault(h, []).append(o)
+
+    # What stands at each head. A line whose history places it (Trace) counts when the line it came from was counted
+    # as written in the window, once for each such line however many heads hold it, and takes that line from the pool,
+    # so in use never passes written; a line that came from anyone else's work, or from the owner's outside the window,
+    # counts nothing, whatever its text. A line history cannot place is matched afterwards by its text (the backstop).
+    def locate(o):
+        """(repository, (commit, blob), place among its added lines) of the line of code id o names, or None."""
+        p = bisect.bisect_right(bases, o) - 1
+        if p < 0 or owners[p] is None:
+            return None
+        repo, version = owners[p]
+        added = code.get(repo)
+        j = o - bases[p]
+        return (repo, version, j) if added is not None and j < len(added.get(version, NO_LINES)[0]) else None
+
+    mapped = {}   # (repository, (commit, blob)) -> the place of each of its added lines among its first holder's
+
+    def through_first(repo, version, j):
+        """Added line j of a version whose content another commit first held: that commit's line of the same text, as
+        (repository, version, place), or what it is known to be when there is none."""
+        blob = version[1]
+        if blob in seeded:
+            return OTHER_ORIGIN
+        first = first_of.get(blob)
+        if first is None or first[1] == version:
+            # a version no commit collect read held (a merge's alone, an unparsed commit's), or its first holder read
+            # without its lines traced (a fork's history read another way): nothing to say
+            return UNKNOWN_ORIGIN
+        places = mapped.get((repo, version))
+        if places is None:
+            there = code.get(first[0])
+            bank = Bank()
+            for k, h in enumerate(there.get(first[1], NO_LINES)[0] if there is not None else ()):
+                bank.put(h, k)
+            places = array("l")
+            for h in code[repo].get(version, NO_LINES)[0]:
+                k = bank.take(h)
+                places.append(-1 if k is None else k)
+            mapped[(repo, version)] = places
+        return (first[0], first[1], places[j]) if places[j] >= 0 else UNKNOWN_ORIGIN
+
+    def resolve(o):
+        """What a line of origin o is: (OWN_PRODUCTION or OWN_TEST, and where it was decided so), or (OTHER_ORIGIN or
+        UNKNOWN_ORIGIN, None). A chain that runs on past any history's length is taken as unknown."""
+        for _ in range(100000):
+            if o <= 0:
+                return o, None
+            at = locate(o)
+            if at is None:
+                return UNKNOWN_ORIGIN, None
+            d = decided.get(at[1])
+            if d is None:
+                at = through_first(*at)
+                if not isinstance(at, tuple):
+                    return at, None
+                d = decided.get(at[1], UNKNOWN_ORIGIN)
+            v = d if isinstance(d, int) else (d[at[2]] if at[2] < len(d) else OTHER_ORIGIN)
+            if v in (OWN_PRODUCTION, OWN_TEST):
+                return v, at
+            o = v
+        return UNKNOWN_ORIGIN, None
+
     in_use = [0, 0]   # production, tests
-    rough_in_use = 0   # of them, lines a fallback read
-    standing = [(s, bytearray(len(s))) for i, s in head.items() if s is not None and code.get(i) is not None]
+    rough_in_use = traced = matched = 0   # of them, lines a fallback read, lines traced, and lines matched by text
+    standing_for = {}   # (commit, blob) -> which of its added lines a line at a head already counts for
+    loose = []   # [repository, standing, the places of its lines history cannot place]
+    for i, s in head.items():
+        if s is None or code.get(i) is None:   # a repository whose diffs could not be read adds nothing in use
+            continue
+        origins = getattr(s, "origins", None)
+        if origins is None or len(origins) != len(s):
+            origins = array("q", bytes(8 * len(s)))
+        unknown_at = []
+        for k in range(len(s)):
+            try:
+                v, at = resolve(origins[k]) if origins[k] else (UNKNOWN_ORIGIN, None)
+            except Exception:   # a history tracing cannot follow: the line is left to the backstop
+                v, at = UNKNOWN_ORIGIN, None
+            if at is None:
+                if v == UNKNOWN_ORIGIN:
+                    unknown_at.append(k)
+                continue
+            repo, version, j = at
+            plus = code[repo][version][0]
+            mask = standing_for.get(version)
+            if mask is None:
+                mask = standing_for[version] = bytearray(len(plus))
+            if mask[j]:
+                continue   # a copy of a line already in use (a fork, a file copied): it was written once
+            h, t, t0 = s.hashes[k], s.tests[k], 1 if v == OWN_TEST else 0
+            for p in ((h, t), (h, 1 - t), (plus[j], t0), (plus[j], 1 - t0)):   # its text now, or as written
+                if pool[p] > 0:
+                    pool[p] -= 1
+                    mask[j] = 1
+                    in_use[t] += 1
+                    traced += 1
+                    rough_in_use += s.rough[k]
+                    break
+        if unknown_at:
+            loose.append((i, s, unknown_at))
+    # The backstop: a line whose history is unknown is matched by its text, spacing aside, against the written lines no
+    # traced line took. One written in code of its own kind (production or tests) is taken first, and a line in a file
+    # the owner's counted commits changed before any other, so a line common to several, such as a lone brace, is
+    # placed where the owner wrote rather than in whichever repository or file is read first; the totals are the same
+    # whatever the order. A line a fallback read is matched before one read exactly, so approximate_in_use says how
+    # many of those in use it could be.
+    plan = []
+    for i, s, places in loose:
+        mine = bytearray(len(s))
+        for path, a, b in getattr(s, "files", ()):
+            if (i, path) in touched:
+                mine[a:b] = b"\x01" * (b - a)
+        tiers = ([k for k in places if mine[k]], [k for k in places if not mine[k]])
+        plan.append((s, [sorted(tier, key=lambda k: not s.rough[k]) for tier in tiers], bytearray(len(s))))
     for same in (True, False):
-        for s, taken in standing:
-            hashes, tests, loose = s.hashes, s.tests, s.rough
-            first, k = [], loose.find(1)
-            while k >= 0:
-                first.append(k)
-                k = loose.find(1, k + 1)
-            for k in itertools.chain(first, range(len(hashes))):
-                if taken[k]:
-                    continue
-                test = tests[k]
-                key = (hashes[k], test if same else 1 - test)
-                if pool[key] > 0:
-                    pool[key] -= 1
-                    taken[k] = 1
-                    in_use[test] += 1
-                    rough_in_use += loose[k]
+        for tier in (0, 1):
+            for s, tiers, taken in plan:
+                for k in tiers[tier]:
+                    if taken[k]:
+                        continue
+                    test = s.tests[k]
+                    p = (s.hashes[k], test if same else 1 - test)
+                    if pool[p] > 0:
+                        pool[p] -= 1
+                        taken[k] = 1
+                        in_use[test] += 1
+                        matched += 1
+                        rough_in_use += s.rough[k]
     return {"events": events, "commits": commit_times, "imports": import_times, "import_lines": import_lines,
             "mismatched": mismatched, "unread": unread, "left_out": dict(left_out), "unchecked": sorted(unchecked),
             "unsure": unsure, "copies": {repos[k]["name"] for k in holding - writing},
@@ -4097,8 +4784,9 @@ def collect(owner, repos, work, since=None):
             "code": {"production": in_use[0], "tests": in_use[1], "unread": sum(1 for v in code.values() if v is None),
                      "heads_unread": sum(1 for v in head.values() if v is None),
                      "approximate": approximate, "approximate_in_use": rough_in_use,
-                     "approximate_imports": rough_imports, "attributes_unread": attributes_unread},
-            "now": dt.datetime.now(dt.timezone.utc).timestamp()}
+                     "approximate_imports": rough_imports, "attributes_unread": attributes_unread,
+                     "traced": traced, "matched": matched, "archived": archived},
+            "now": now}
 
 
 def remove_tree(path):
@@ -4691,6 +5379,14 @@ MONTHS = ["JAN", "FEB", "MAR", "APR", "MAY", "JUN", "JUL", "AUG", "SEP", "OCT", 
 def day_start(t, zone):
     """The start of the calendar day in zone that the moment t falls on."""
     return dt.datetime.fromtimestamp(t, zone).replace(hour=0, minute=0, second=0, microsecond=0).timestamp()
+
+
+def first_day(t, zone):
+    """The start of the first calendar day in zone that begins at or after the moment t: where a window reaching back
+    to t starts, so a day is inside the window or outside it, never cut at the hour the run happens to start, and a
+    commit's day is inside exactly when the commit is: day_start(x) >= first_day(t) exactly when x >= first_day(t)."""
+    d = day_start(t, zone)
+    return d if d >= t else day_start(d + 36 * 3600, zone)   # 36 hours on is the next day, however long a day is
 
 
 def day_label(t, zone):
@@ -6202,7 +6898,10 @@ DEFINITIONS = {
                  "time its exact content appears in any of the account's repositories or branches.",
         "method": "Read from each commit's own diff. A line rewritten counts again; deleting a line takes nothing off. "
                   "A file moved to a new name while being edited adds only the lines it changed, whether or not git "
-                  "paired the two names.",
+                  "paired the two names, and a block of 3 or more lines moved within one commit, inside its file or "
+                  "into another, adds nothing. For a repository whose diffs could not be read, git's own count of "
+                  "added lines stands instead, comments and blank lines included (approximate_loc; "
+                  "scope.repositories.read_without_line_diffs).",
         "leaves_out": "Commits by other accounts or by automation; reformatting sweeps (ten or more files at once, "
                       "each adding about what it deletes and its changed lines still reading nearly as they did) and "
                       "commits listed in .git-blame-ignore-revs; what a change landed twice lands again (only lines "
@@ -6221,16 +6920,32 @@ DEFINITIONS = {
         "limits": "A codebase brought in more slowly than that, in commits more than an hour apart or of fewer than 50 "
                   "files each, counts as written."},
     "in_use": {
-        "means": "Lines of code standing today at the head of each repository's default branch whose text, spacing "
-                 "aside, matches a line counted as written in the window, each written line matched at most once "
-                 "across all the account's repositories.",
-        "method": "A line the owner's own reformatting sweep changed hands its match to the line the sweep left in its "
-                  "place.",
-        "limits": "Matching is by text, not by history: a line with the same text as one the owner wrote, a lone "
-                  "closing brace above all, can match whoever put it there. Read it as an upper bound on how much "
-                  "of what was written still stands. It says nothing about whether the code is deployed or run. A "
+        "means": "Lines of code standing today at the head of each repository's default branch that the owner wrote "
+                 "in the window, where wrote means exactly the lines counted as written: each written line counts in "
+                 "use at most once across all the account's repositories, so in use never exceeds written, and a file "
+                 "copied into a second repository, or a fork, is in use once. An archived repository's head is left "
+                 "out (scope.repositories.archived); its history still counts as written.",
+        "method": "Traced through each repository's history: every file version's lines are the version before's with "
+                  "the diff applied, so each line keeps the change that added it, and counts when that line was "
+                  "counted as written in the window, whatever its text. A line from anyone else's commit, an import, "
+                  "a template or a relay copy, or from the owner's own before the window, counts nothing. A "
+                  "reformatting sweep, whoever made it, a block moved within one commit, a change landed again and a "
+                  "squash of a kept branch write nothing, and hand each line they change on to the line they leave in "
+                  "its place. "
+                  "A merge's lines take the origin of the same text in the version it merged in. A line whose origin "
+                  "the history cannot give (one in a file version no diff could be read against, one only a merge's "
+                  "own conflict resolution wrote, or one in a version only a merge made where git is too old to show "
+                  "merges) is matched instead by its text, spacing aside, against the written lines no traced line "
+                  "took, a line of its own kind (production or tests) and in a file the owner changed first. "
+                  "traced_loc counts the lines traced and matched_by_text_loc those matched by text.",
+        "limits": "A line matched by text can match a line of the same text the owner wrote elsewhere, a lone closing "
+                  "brace above all, so only matched_by_text_loc rests on that approximation. A squash merge is told "
+                  "from a direct commit by its lines alone (at least 80% of its added lines, among them 3 different "
+                  "ones, waiting on a kept branch), so a direct commit made almost wholly of an abandoned branch's "
+                  "lines counts as landing them. It says nothing about whether the code is deployed or run. A "
                   "repository whose head or whose diffs could not be read adds nothing in use "
-                  "(scope.repositories.read_without_head, read_without_line_diffs)."},
+                  "(scope.repositories.read_without_head, read_without_line_diffs), so for such an account in use "
+                  "can fall below what still stands."},
     "production": {"means": "Lines in use that are not test code."},
     "test": {
         "means": "Lines in use that are test code: in a folder of tests (such as tests, __tests__, spec, e2e, "
@@ -6244,8 +6959,8 @@ DEFINITIONS = {
                   "test code only inside its test module's folder."},
     "retained_fraction": {
         "means": "Lines in use divided by lines written: how much of the window's writing the heads still hold.",
-        "limits": "A ratio of two totals, so it carries the limits of both; it is not the share of individual lines "
-                  "that survived."},
+        "limits": "A ratio of two totals, so it carries the limits of both. In use counts only lines counted as "
+                  "written, each once, so the ratio is never more than 1."},
     "commit": {
         "means": "A commit that is not a merge, on any branch (gh-pages, and what only it holds, only when it is the "
                  "default), by the owner: counted once however many repositories hold it, and once when the same "
@@ -6315,8 +7030,11 @@ def card_data(owner, window, now, zone, start, S, repos, private, data, stats, s
     left = data["left_out"]
     drawn = percents({l: totals[l] / grand for l in names}) if grand else {}
     loc = data.get("code") or {}
-    rough = sum(n for t, n in loc.get("approximate", ()) if start <= t <= now + FUTURE_SLACK)
+    rough = sum(n for t, n in loc.get("approximate", ()) if window_holds(t, start, now))
     unsure, authors = data.get("unsure") or (), data.get("authors") or {}
+    # of what is in use, how many lines their history placed and how many were matched by their text (see collect);
+    # a collect that does not say counts every line as matched, which is what an earlier one did
+    traced = min(loc.get("traced", 0), use)
     return {
         "schema": SCHEMA,
         "schema_note": "Fields are only ever added within %s; ignore any you do not know. #/definitions says what each "
@@ -6334,6 +7052,7 @@ def card_data(owner, window, now, zone, start, S, repos, private, data, stats, s
                              "read_without_line_diffs": loc.get("unread", 0),
                              "read_without_head": loc.get("heads_unread", 0),
                              "read_without_gitattributes": loc.get("attributes_unread", 0),
+                             "archived": loc.get("archived", 0),
                              "left_out_as_unattributable": len(unsure)},
             "owned_only": True, "forks": "excluded", "visibility": "public and private" if private else "public only",
             "branches": "every branch; gh-pages only when it is the default",
@@ -6343,7 +7062,8 @@ def card_data(owner, window, now, zone, start, S, repos, private, data, stats, s
         "quantity": {
             "written_loc": figure(written, "lines of code", "measured", "written", approximate_loc=min(rough, written)),
             "in_use_loc": figure(use, "lines of code", "measured", "in_use", equals="production_loc + test_loc",
-                                 approximate_loc=min(loc.get("approximate_in_use", 0), use)),
+                                 approximate_loc=min(loc.get("approximate_in_use", 0), use),
+                                 traced_loc=traced, matched_by_text_loc=use - traced),
             "production_loc": figure(prod, "lines of code", "measured", "production"),
             "test_loc": figure(tests, "lines of code", "measured", "test"),
             "retained_fraction": figure(round(use / float(written), 4) if written else None, "fraction", "derived",
@@ -6372,9 +7092,10 @@ def card_data(owner, window, now, zone, start, S, repos, private, data, stats, s
         "left_out": {
             "commits": {"by_other_accounts": left.get("others", 0), "automation": left.get("automation", 0),
                         "landed_twice": left.get("landed_twice", 0), "template_or_relay_copy": left.get("copied", 0)},
-            "imports": {"commits": sum(1 for t in data["imports"] if t >= start),
-                        "loc_skipped": sum(n for t, n in data["import_lines"] if t >= start),
-                        "approximate_loc": sum(n for t, n in loc.get("approximate_imports", ()) if t >= start),
+            "imports": {"commits": sum(1 for t in data["imports"] if window_holds(t, start, now)),
+                        "loc_skipped": sum(n for t, n in data["import_lines"] if window_holds(t, start, now)),
+                        "approximate_loc": sum(n for t, n in loc.get("approximate_imports", ())
+                                               if window_holds(t, start, now)),
                         "definition": "#/definitions/import"},
             "future_dated_file_versions": sum(1 for t, _, _ in data["events"] if t > now + FUTURE_SLACK),
             "unparsed_commits": data["mismatched"],
@@ -6734,11 +7455,21 @@ def main():
             "to overwrite." % (len(repos), was))
         return 1
 
+    # The zone comes first: every time is moved to the start of its own day there, so nothing drawn or written
+    # tells when in a day anyone worked. Without that, the chart's last day, drawn hours wide, and the data file
+    # together placed each commit of the past week within half an hour. The window is cut once, here, at the start of
+    # its first whole day in that zone, and collect cuts what is in use exactly where what is written is cut below
+    # (window_holds, with the now collect returns), so in use can never count a line written leaves out.
+    days_back = WINDOWS[window][2]
+    begun = time.time()
+    shown = profile_offset(owner)
+    offset, seen = shown if shown else (None, None)
+    zone = local_zone(offset, profile_location(owner), begun, seen)
+    start = first_day(begun - days_back * 86400, zone) if days_back else float("-inf")
     work = os.environ.get("CLONE_CACHE") or tempfile.mkdtemp(prefix="cards-")
     os.makedirs(work, exist_ok=True)
     try:
-        back = WINDOWS[window][2]   # what is still in use counts what was written inside the window
-        data = collect(owner, repos, work, time.time() - back * 86400 if back else None)
+        data = collect(owner, repos, work, start if days_back else None)
     finally:
         if not os.environ.get("CLONE_CACHE"):
             remove_tree(work)
@@ -6767,20 +7498,15 @@ def main():
     # a repository holding only others' file versions (a relay copy), or left out, makes nothing of the owner's private
     private = sum(1 for r in repos if r["isPrivate"] and r["name"] not in data["copies"] and r["name"] not in unsure)
 
-    now, days_back = data["now"], WINDOWS[window][2]
-    # The zone comes first: every time is moved to the start of its own day there, so nothing drawn or written
-    # tells when in a day anyone worked. Without that, the chart's last day, drawn hours wide, and the data file
-    # together placed each commit of the past week within half an hour.
-    shown = profile_offset(owner)
-    offset, seen = shown if shown else (None, None)
-    zone = local_zone(offset, profile_location(owner), now, seen)
+    now = data["now"]
     if not zone_database():   # said whatever the profile shows, so the line tells a reader nothing about it
         say("note: this Python has no time zone database (pip install tzdata), so days are counted in UTC "
             "or at a fixed offset")
     AS_OF = day_label(now, zone)
-    events = [(day_start(t, zone), lang, n) for t, lang, n in data["events"] if t <= now + FUTURE_SLACK]
-    commit_times = [day_start(t, zone) for t in data["commits"] if t <= now + FUTURE_SLACK]
-    start = now - days_back * 86400 if days_back else float("-inf")
+    # the window's test (window_holds) cuts the future here and the window's start below, on whole days: start is a
+    # day's start, so a day-started time is inside it exactly when the moment itself is
+    events = [(day_start(t, zone), lang, n) for t, lang, n in data["events"] if window_holds(t, None, now)]
+    commit_times = [day_start(t, zone) for t in data["commits"] if window_holds(t, None, now)]
     column = [(max(0.0, (now - t) / 86400.0), lang, n) for t, lang, n in events if t >= start]
     dated = [t for t in commit_times if t >= start]
     recent_day = None
