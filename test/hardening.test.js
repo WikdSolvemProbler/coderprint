@@ -216,7 +216,7 @@ test('namespace declarations and prefixed names are checked as Namespaces in XML
     '<g xmlns:a="urn:1"><g xmlns:b="urn:1" a:x="1" b:x="2"/></g>',
     '<g xmlns:a="urn:&#120;" xmlns:b="urn:x" a:y="1" b:y="2"/>',
     // The reserved prefixes and namespaces.
-    `<g xmlns:x="${XML_NS}"/>`, '<g xmlns:xml="urn:x"/>', `<g xmlns="${XML_NS}"/>`, '<g xmlns:xmlns="urn:x"/>',
+    `<g xmlns:x="${XML_NS}"/>`, '<g xmlns:xml="urn:x"/>', `<g xmlns="${XML_NS}"/>`, '<g xmlns:xmlns="urn:x"/>', '<xml:g/>',
     `<g xmlns:xmlns="${XMLNS_NS}"/>`, `<g xmlns="${XMLNS_NS}"/>`, `<g xmlns:q="${XMLNS_NS}"/>`, '<xmlns:g/>', '<g xmlns:x="urn:x" xmlns:y="urn:y" xmlns:x="urn:z"/>',
     // A prefix cannot be undeclared.
     '<g xmlns:p=""/>',
@@ -242,7 +242,7 @@ test('namespace declarations and prefixed names are checked as Namespaces in XML
     `<g xmlns:xlink="${XLINK}X"><image xlink:href="#a"/></g>`,
     '<g href="#a" xlink:href="#b"/>',
     '<g xmlns:a="http://example.com:8080/a/b%20c?x=1&amp;y=/?#f/?"/>',
-    '<g xmlns:a="mailto:a@b"/>', '<g xmlns:a="file:///x"/>', '<g xmlns:a="ht&#x74;p://a/b"/>', '<xml:g/>',
+    '<g xmlns:a="mailto:a@b"/>', '<g xmlns:a="file:///x"/>', '<g xmlns:a="ht&#x74;p://a/b"/>',
     '<div xmlns="http://www.w3.org/1999/xhtml"><svg xmlns="http://www.w3.org/2000/svg"/></div>',
   ];
   for (const markup of kept) assert.equal(sanitize(markup), markup, markup);
