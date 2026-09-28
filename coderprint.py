@@ -6900,7 +6900,8 @@ DEFINITIONS = {
         "method": "Read from each commit's own diff. A line rewritten counts again; deleting a line takes nothing off. "
                   "A file moved to a new name while being edited adds only the lines it changed, whether or not git "
                   "paired the two names, and a block of 3 or more lines moved within one commit, inside its file or "
-                  "into another, adds nothing. For a repository whose diffs could not be read, git's own count of "
+                  "into another, spacing aside (so a block only re-indented is moved too), adds nothing. For a "
+                  "repository whose diffs could not be read, git's own count of "
                   "added lines stands instead, comments and blank lines included (approximate_loc; "
                   "scope.repositories.read_without_line_diffs).",
         "leaves_out": "Commits by other accounts or by automation; reformatting sweeps (ten or more files at once, "
