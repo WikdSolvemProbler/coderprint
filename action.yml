@@ -31,7 +31,7 @@ inputs:
     description: Your watermark as SVG path data with straight segments only (M, L, H, V, Z), filled even-odd, up to 48 KB. Pass it from a secret (a repository secret named CODERPRINT_MARK, for example) so the path data never sits in your repository. It is drawn into the panel as pixels merged with the background; like any picture, what is drawn can still be seen and traced. Optional.
     default: ""
   author-emails:
-    description: Email addresses you commit from that are not linked to your GitHub account, separated by commas, so their commits count as yours. Optional; addresses linked to your account, and your noreply addresses, are recognized already.
+    description: Email addresses you commit from that are not linked to your GitHub account, separated by commas, spaces or new lines, each bare or as Name <address>, so their commits count as yours. An address GitHub links to another account is ignored. Optional; addresses linked to your account, and your noreply addresses, are recognized already.
     default: ""
   time-limit:
     description: Seconds the drawing step may run, 300 to 86400. Keep it under the job's timeout-minutes; a repository that cannot be read in time is left out and counted.

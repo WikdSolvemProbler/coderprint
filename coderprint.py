@@ -171,8 +171,14 @@ IMPORT_FILES = 500
 TIMEOUT = 900
 DEADLINE = None   # the run's own deadline, on time.monotonic(), when CARDS_TIME_LIMIT sets one (see time_limit)
 RESERVE = 120     # seconds kept back from it for reading the profile and drawing and writing the panels
+LOOKUP_RESERVE = 60   # and kept back as well while repositories are read, for asking whose each address is after them
 UNREAD_SHARE = 0.10   # the panels are redrawn when at most one repository, or this share of them, could not be read
 UPSTREAM = "WikdSolvemProbler/coderprint"   # this project, whose files a relay copy holds but did not write
+RELAY_FILES = {"api/card.js", "lib/compose.js"}   # files every relay copy of it holds, both of them
+# The lookups that tell the owner's code from others', named in collect()'s "unchecked" when GitHub cannot answer
+# one: the run then keeps the existing panels rather than count everything as the owner's (see main).
+UNCHECKED = {"authorship": "whose each commit's address is",
+             "templates": "which of the repositories were made from another account's template"}
 ALIASES = 50        # commits looked up in one query when telling whose an email address is
 RESOLVE_CALLS = 20  # and at most this many queries a run; addresses past them stay unknown
 # Automation that commits under a name or address of its own rather than a [bot] one: git scraping, release
@@ -181,6 +187,18 @@ AUTOMATION_NAMES = {"automated", "github action", "github actions", "github-acti
                     "semantic-release-bot"}
 AUTOMATION_EMAILS = {"action@github.com", "actions@github.com", "actions@users.noreply.github.com",
                      "github-actions@github.com", "41898282+github-actions[bot]@users.noreply.github.com"}
+# A GitHub App's own noreply address, which any commit made as the App carries whatever name it gives; and an
+# account's own noreply address of the id+login form, whose id no change of login alters (see authorship).
+BOT_NOREPLY = re.compile(r"(?:\d+\+)?[^@\s]*\[bot\]@users\.noreply\.github\.com")
+NOREPLY = re.compile(r"(\d+)\+[^@\s]+@users\.noreply\.github\.com")
+# The name of a bot or a coding agent committing under an identity of its own ("Renovate Bot", "Cursor Agent",
+# "release-bot"): its last word is bot or agent. Such a name tells no person's work (see authorship).
+AGENT_NAME = re.compile(r"(?:^|[\s._-])(?:bot|agent)$")
+# Names a machine, an editor's container or a tutorial gives a commit, which say nothing about who wrote it: one the
+# owner's own commits used is never taken as the owner's name for another address (see authorship).
+GENERIC_NAMES = {"root", "admin", "administrator", "user", "owner", "ubuntu", "debian", "pi", "vscode", "node",
+                 "codespace", "codespaces", "gitpod", "runner", "vagrant", "ec2-user", "docker", "jenkins", "git",
+                 "your name", "yourname", "unknown", "localhost", "(none)"}
 Commit = namedtuple("Commit", "ts repo sha bot email name subject files")
 Change = namedtuple("Change", "blob status path added deleted")
 # A sweep: a commit that modifies at least SWEEP_FILES counted files, nearly every one (SWEEP_SHARE) adding
@@ -630,35 +648,106 @@ def truthy(name):
     return os.environ.get(name, "").strip().lower() in ("1", "true", "yes")
 
 
+class OutOfTime(RuntimeError):
+    """The run's deadline (see time_limit) left no time to start a command, or cut one short. A repository that
+    cannot be read in time is left out and counted, but running out of time is never a reason to count differently:
+    what would have told the owner's code from others' is not guessed at."""
+
+
+class Failed(RuntimeError):
+    """A command that exited with an error. output holds what it printed, which for gh is GitHub's answer even when
+    that answer carries errors; like the message it is never printed, since it can name a private repository."""
+
+    def __init__(self, message, output=b""):
+        RuntimeError.__init__(self, message)
+        self.output = output
+
+
+def time_left():
+    """How long a command may still run under the run's deadline (see time_limit): what is left less RESERVE, or
+    None without a deadline. Fails as OutOfTime when that is under five seconds."""
+    if DEADLINE is None:
+        return None
+    left = DEADLINE - time.monotonic() - RESERVE
+    if left < 5:
+        raise OutOfTime("the run is out of time")
+    return int(left)
+
+
 def run(args, cwd=None, env=None, timeout=TIMEOUT):
     """Run a command. Failures carry only the program's name: argv can hold a clone URL, which would
     name a private repository in a public log, so no exception that carries argv leaves here. Under a
-    deadline (see time_limit) a command gets no longer than the run has left, less RESERVE."""
+    deadline (see time_limit) a command gets no longer than the run has left, less RESERVE, and one the deadline
+    cuts short fails as OutOfTime."""
     what = os.path.basename(args[0])
-    if DEADLINE is not None:
-        left = DEADLINE - time.monotonic() - RESERVE
-        if left < 5:
-            raise RuntimeError("%s was not started: the run is out of time" % what)
-        timeout = min(timeout, int(left))
+    try:
+        left = time_left()
+    except OutOfTime:
+        raise OutOfTime("%s was not started: the run is out of time" % what) from None
+    cut = left is not None and (timeout is None or left < timeout)
+    if cut:
+        timeout = left
     try:
         p = subprocess.run(args, cwd=cwd, env=env, capture_output=True, timeout=timeout)
     except subprocess.TimeoutExpired:
+        if cut:
+            raise OutOfTime("%s timed out after %d seconds: the run is out of time" % (what, timeout)) from None
         raise RuntimeError("%s timed out after %d seconds" % (what, timeout)) from None
     except OSError:
         raise RuntimeError("%s could not be started" % what) from None
     if p.returncode != 0:
-        raise RuntimeError("%s exited %d" % (what, p.returncode))
+        raise Failed("%s exited %d" % (what, p.returncode), p.stdout)
     return p.stdout
 
 
-def gql(query, timeout=TIMEOUT, **variables):
+def graphql_args(query, variables):
     args = ["gh", "api", "graphql", "-f", "query=" + query]
     for k, v in variables.items():
         args += ["-f", "%s=%s" % (k, v)]
-    data = json.loads(run(args, timeout=timeout).decode("utf-8"))
-    if not isinstance(data, dict) or "data" not in data:
+    return args
+
+
+def graphql_answer(out):
+    """gh's output as GitHub's answer, {"data": {...}, "errors": [...]}. An answer whose data is missing or null, as
+    GitHub gives when a query fails as a whole, fails here."""
+    data = json.loads(out.decode("utf-8"))
+    if not isinstance(data, dict) or not isinstance(data.get("data"), dict):
         raise RuntimeError("the GitHub API returned no data")
-    return data["data"]
+    return data
+
+
+def gql(query, timeout=TIMEOUT, errors=None, **variables):
+    """GitHub's answer to a query, its data. An answer that carries errors fails, as gh exits 1 on it, unless errors
+    is a list: the answer is then taken, since gh prints it all the same, and its errors are added to the list. A
+    field an error names, such as one the token may not see, is null in the data. Fails when there is no data."""
+    args = graphql_args(query, variables)
+    if errors is None:
+        return graphql_answer(run(args, timeout=timeout))["data"]
+    try:
+        out = run(args, timeout=timeout)
+    except Failed as e:
+        out = e.output
+    answer = graphql_answer(out)
+    found = answer.get("errors") or []
+    errors.extend(found if isinstance(found, list) else [found])
+    return answer["data"]
+
+
+def answered(query, **variables):
+    """GitHub's answer to a query as (data, errors), taking an answer that carries errors beside its data (see gql)."""
+    errors = []
+    return gql(query, errors=errors, **variables), errors
+
+
+def again(ask):
+    """ask(), and once more if it fails, as a repository is read: a lookup that tells the owner's code from others'
+    is worth a second try before the run gives up on it. Running out of time is not tried again."""
+    try:
+        return ask()
+    except OutOfTime:
+        raise
+    except (RuntimeError, ValueError, KeyError, TypeError, AttributeError):
+        return ask()
 
 
 # ---------------------------------------------------------------- collect
@@ -813,12 +902,14 @@ def language_of(path):
 
 
 def automated(name, email, committer, committer_email):
-    """Whether a commit is automation's: a [bot] author or committer, or a name or address automation
-    uses (AUTOMATION_NAMES, AUTOMATION_EMAILS). GitHub's own web committer, which marks the owner's edits
-    and merges on github.com, is not automation."""
+    """Whether a commit is automation's: a [bot] author or committer, a GitHub App's own noreply address
+    (BOT_NOREPLY) whatever name it carries, or a name or address automation uses (AUTOMATION_NAMES,
+    AUTOMATION_EMAILS). GitHub's own web committer, which marks the owner's edits and merges on github.com, is not
+    automation."""
     names = (name.strip().lower(), committer.strip().lower())
     return (any(n.endswith("[bot]") or n in AUTOMATION_NAMES for n in names)
-            or email.strip().lower() in AUTOMATION_EMAILS or committer_email.strip().lower() in AUTOMATION_EMAILS)
+            or any(e in AUTOMATION_EMAILS or BOT_NOREPLY.fullmatch(e)
+                   for e in (email.strip().lower(), committer_email.strip().lower())))
 
 
 def pages_only(repo_dir):
@@ -843,7 +934,9 @@ def read_commits(repo_dir, index, renames=True):
     Records are split on NUL and a record's fields on newlines: git strips newlines from every name and address and a
     subject never holds one, while a name may hold any other control character, 0x1F included. Lines are split on
     newlines alone, never where str.splitlines would also split (U+2028, U+2029, U+0085, 0x1C to 0x1E), which
-    core.quotepath=off leaves unquoted in a path; the characters git does quote are unquoted (git_path). The
+    core.quotepath=off leaves unquoted in a path; the characters git does quote are unquoted (git_path). Addresses are
+    read as committed (%ae, %ce), not as a .mailmap would rewrite them (a bare clone reads HEAD:.mailmap), since
+    GitHub, which says whose an address is (see authorship), reads them so; the names are read as committed too. The
     subject is never printed or written."""
     if not run(["git", "-C", repo_dir, "for-each-ref", "--count=1", "refs/heads"]).strip():
         return [], 0  # an empty repository has nothing to read
@@ -851,7 +944,7 @@ def read_commits(repo_dir, index, renames=True):
     out = run(["git", "-C", repo_dir] + READ_CONFIG + [
                "log", "--exclude=refs/heads/gh-pages", "--all", "--date-order", "--no-merges",
                "-M" if renames else "--no-renames", "--no-abbrev", "--no-textconv", "--no-ext-diff", "--no-color",
-               "--raw", "--numstat", "--format=%x00%H%n%at%n%an%n%aE%n%cn%n%cE%n%s"],
+               "--raw", "--numstat", "--format=%x00%H%n%at%n%an%n%ae%n%cn%n%ce%n%s"],
               env=read_env()).decode("utf-8", "replace")
     commits, mismatched = [], 0
     for block in out.split("\x00")[1:]:
@@ -953,6 +1046,8 @@ def ignored_revs(repo_dir):
     case, and so does this."""
     try:
         text = run(["git", "-C", repo_dir, "show", "HEAD:.git-blame-ignore-revs"], timeout=60)
+    except OutOfTime:
+        raise   # not known to list nothing: the repository is left out and counted instead (see read_repository)
     except RuntimeError:
         return set()
     listed = re.findall(r"(?mi)^[ \t]*([0-9a-f]{64}|[0-9a-f]{40})\b", text.decode("utf-8", "replace"))
@@ -971,7 +1066,7 @@ def read_repository(owner, name, dest, index):
             commits, bad = read_commits(dest, index, renames)
             return commits, bad, ignored_revs(dest)
         except RuntimeError as e:
-            if attempt == 2 or "out of time" in str(e):
+            if attempt == 2 or isinstance(e, OutOfTime) or "out of time" in str(e):
                 raise
             renames = renames and "timed out" not in str(e)
             if os.path.isdir(dest):   # a clone that failed part way is started again, not fetched into
@@ -981,66 +1076,87 @@ def read_repository(owner, name, dest, index):
 def seed_blobs(full_name, dest):
     """Every file version in the whole history of a repository someone else wrote (a template, or coderprint
     itself in a relay copy), read from a clone without file contents: git lists a file version it does not
-    hold with a leading "?". None if it cannot be read, which only means nothing is left out."""
+    hold with a leading "?". None if it cannot be read, even on a second try; collect then leaves out the
+    repositories whose files it would have told apart."""
     if not re.fullmatch(r"[A-Za-z0-9-]{1,39}/[A-Za-z0-9._-]{1,100}", full_name):
         return None
     flags, env = git_auth()
+
+    def read():
+        try:
+            run(["git"] + flags + ["clone", "--bare", "--quiet", "--filter=blob:none",
+                                   "https://github.com/%s.git" % full_name, dest], env=env, timeout=300)
+            return run(["git", "-C", dest, "rev-list", "--objects", "--all", "--missing=print"], timeout=300)
+        finally:
+            if os.path.isdir(dest):
+                remove_tree(dest)
     try:
-        run(["git"] + flags + ["clone", "--bare", "--quiet", "--filter=blob:none",
-                               "https://github.com/%s.git" % full_name, dest], env=env, timeout=300)
-        out = run(["git", "-C", dest, "rev-list", "--objects", "--all", "--missing=print"], timeout=300)
+        out = again(read)
     except RuntimeError:
         return None
-    finally:
-        if os.path.isdir(dest):
-            remove_tree(dest)
     return {line[1:].strip() for line in out.decode("ascii", "replace").splitlines() if line.startswith("?")}
 
 
 def templates(owner):
-    """The template each repository was made from, when that is another account's: {name: owner/name}.
-    Asked apart from the listing, so a template the token cannot see never fails the run; nothing on
-    any failure."""
+    """The template each repository was made from, when that is another account's: {name: owner/name}, or {name:
+    None} for a repository whose template GitHub answers with an error for, as it may for a template the token
+    cannot see. Asked apart from the listing, so such a template never fails the listing, and each page is asked
+    twice before giving up. None when GitHub cannot be asked, or answers with an error that names no repository:
+    the files of the templates it would have named would then count as written (see collect)."""
     found, cursor = {}, None
+    query = """
+      query($owner: String!, $cursor: String) { repositoryOwner(login: $owner) {
+        repositories(first: 100, after: $cursor, ownerAffiliations: OWNER, isFork: false) {
+          nodes { name templateRepository { nameWithOwner } } pageInfo { hasNextPage endCursor } } } }"""
     try:
         while True:
             page_args = {"owner": owner}
             if cursor:
                 page_args["cursor"] = cursor
-            data = gql("""
-              query($owner: String!, $cursor: String) { repositoryOwner(login: $owner) {
-                repositories(first: 100, after: $cursor, ownerAffiliations: OWNER, isFork: false) {
-                  nodes { name templateRepository { nameWithOwner } } pageInfo { hasNextPage endCursor } } } }""",
-                       **page_args)
+            data, errors = again(lambda: answered(query, **page_args))
             page = data["repositoryOwner"]["repositories"]
-            for node in page["nodes"]:
+            unseen = set()   # the places on this page of the repositories an error names
+            for e in errors:
+                path = e.get("path") if isinstance(e, dict) else None
+                if not (isinstance(path, list) and path[:3] == ["repositoryOwner", "repositories", "nodes"]
+                        and len(path) > 3 and isinstance(path[3], int)):
+                    return None
+                unseen.add(path[3])
+            for k, node in enumerate(page["nodes"]):
+                if not isinstance(node, dict) or not isinstance(node.get("name"), str):
+                    return None
                 made = (node.get("templateRepository") or {}).get("nameWithOwner") or ""
                 if made and made.split("/")[0].lower() != owner.lower():
                     found[node["name"]] = made
+                elif k in unseen and not made:
+                    found[node["name"]] = None
             if not page["pageInfo"]["hasNextPage"]:
                 return found
             cursor = page["pageInfo"]["endCursor"]
-    except (RuntimeError, ValueError, KeyError, TypeError):
-        return {}
+    except (RuntimeError, ValueError, KeyError, TypeError, AttributeError):
+        return None
 
 
 def owner_identity(owner):
     """Whether the account is a person, and a person's account id and profile name, for telling their commits
-    from other people's. None when it cannot be read."""
-    try:
-        data = gql("query($owner: String!) { repositoryOwner(login: $owner) { __typename "
-                   "... on User { databaseId name } } }", owner=owner)
-        found = data["repositoryOwner"]
+    from other people's. None when it cannot be read, even on a second try."""
+    def ask():
+        found = gql("query($owner: String!) { repositoryOwner(login: $owner) { __typename "
+                    "... on User { databaseId name } } }", owner=owner)["repositoryOwner"]
         return {"user": found["__typename"] == "User", "id": found.get("databaseId"), "name": found.get("name") or ""}
-    except (RuntimeError, ValueError, KeyError, TypeError):
+    try:
+        return again(ask)
+    except (RuntimeError, ValueError, KeyError, TypeError, AttributeError):
         return None
 
 
 def resolve_authors(owner, samples):
     """Whose GitHub account each email address is, asked through one commit that uses it: samples maps an
-    address to (repository name, commit hash), most used first. Returns {address: login, or None when the
-    address belongs to no account}; addresses past RESOLVE_CALLS queries of ALIASES are left out. Raises
-    RuntimeError if GitHub cannot be asked, so the caller can count every commit rather than guess."""
+    address to (repository name, commit hash), in the order to ask them. Returns {address: login, or None when the
+    address belongs to no account}. Addresses past RESOLVE_CALLS queries of ALIASES are left out, and so is one
+    GitHub answers with an error or with nothing for, as for a repository deleted since it was read. Each query is
+    asked twice before giving up. Raises RuntimeError if GitHub cannot be asked, or answers with an error that names
+    no address, so the caller never guesses (see collect)."""
     if not re.fullmatch(r"[A-Za-z0-9-]{1,39}", owner):
         raise RuntimeError("the account's login cannot be looked up")
     found, items = {}, [(e, s) for e, s in samples.items()
@@ -1053,48 +1169,115 @@ def resolve_authors(owner, samples):
             r, owner, name, " ".join('c%d: object(oid: "%s") { ... on Commit { author { user { login } } } }' % pair
                                      for pair in shas))
             for r, (name, shas) in enumerate(by_repo.items()))
-        data = gql("query { %s }" % query)
+        data, errors = again(lambda: answered("query { %s }" % query))
+        failed = set()   # what an error names: ("r1",) for a whole repository, ("r1", "c3") for one commit
+        for e in errors:
+            path = e.get("path") if isinstance(e, dict) else None
+            if not isinstance(path, list) or not path or not re.fullmatch(r"r\d+", str(path[0])):
+                raise RuntimeError("the GitHub API answered with an error")
+            failed.add(tuple(str(p) for p in path[:2]))
         for r, (name, shas) in enumerate(by_repo.items()):
-            repo = data.get("r%d" % r) or {}
+            repo = data.get("r%d" % r)
             for j, _ in shas:
-                user = ((repo.get("c%d" % j) or {}).get("author") or {}).get("user") or {}
-                found[batch[j][0]] = user.get("login")
+                node = repo.get("c%d" % j) if isinstance(repo, dict) else None
+                if (("r%d" % r,) in failed or ("r%d" % r, "c%d" % j) in failed or not isinstance(node, dict)
+                        or not isinstance(node.get("author"), dict)):
+                    continue   # not answered: the address stays unknown
+                user = node["author"].get("user")
+                found[batch[j][0]] = user.get("login") if isinstance(user, dict) else None
     return found
 
 
-def authorship(owner, commits, identity, repos):
-    """The addresses whose commits are the owner's. The owner's noreply addresses and any listed in
-    CARDS_AUTHOR_EMAILS are theirs; every other address is looked up on GitHub. One that belongs to another
-    account is someone else's. One that belongs to none is the owner's in a repository with no other human
-    address (a solo repository is its owner's, whatever laptop it was committed from), and elsewhere only
-    under a name the owner's own commits, login or profile use. Returns None, so every commit counts, for an
-    organization, whose members' work is all its own, or when GitHub cannot be asked."""
+def author_emails():
+    """The addresses CARDS_AUTHOR_EMAILS lists, however the list is written: separated by commas, semicolons, spaces
+    or new lines (as a YAML block or folded list gives them), each bare or as git prints it, Name <address>. An entry
+    without an @ is no address, and is left out."""
+    return {e.strip("<>\"'()[]").lower() for e in re.split(r"[\s,;]+", os.environ.get("CARDS_AUTHOR_EMAILS", ""))
+            if "@" in e}
+
+
+def agent_name(name):
+    """Whether a commit's name is a bot's or a coding agent's own (AGENT_NAME)."""
+    return bool(AGENT_NAME.search(name.strip().casefold()))
+
+
+def authorship(owner, commits, identity, repos, notes=None):
+    """The addresses whose commits are the owner's, as (repository, address). The owner's noreply addresses are
+    theirs, a noreply address of the id+login form is theirs by their account id whatever login it was made under
+    and otherwise another account's, and every other address is looked up on GitHub, with no lookup needed for a
+    noreply address of either form. One that belongs to another account is someone else's; so is one listed in
+    CARDS_AUTHOR_EMAILS that does, and every other listed address is the owner's. One that belongs to none is the
+    owner's under a name the owner's own commits, login or profile use (a name a machine or a tutorial gives, as
+    GENERIC_NAMES, or a bot's or an agent's, tells no one), and otherwise in a repository with no other human address
+    (a solo repository is its owner's, whatever laptop it was committed from), unless its name is a bot's or a
+    coding agent's own (AGENT_NAME); the owner's own linked addresses count as other addresses there. One GitHub was
+    not asked about, past the lookup's limit or unanswered, counts only under such a name.
+
+    The lookup asks first the addresses listed in CARDS_AUTHOR_EMAILS, then those found in more of the account's
+    repositories (the owner's own recur; a mirrored project's thousand authors each sit in one), those under a
+    name the owner uses, those alone in a repository, and then the most used, so the ones whose answer is likeliest
+    to change what counts are asked within its limit. Returns None, so every commit counts, for an organization,
+    whose members' work is all its own, or when GitHub cannot be asked (see collect). notes, when given, gets
+    "agents": the (repository, address) pairs left out as a bot's or an agent's, "refused": how many listed
+    addresses belong to another account, and "unknown": the addresses GitHub was not asked about."""
     if not identity or not identity["user"]:
         return None
     mine = {"%s@users.noreply.github.com" % owner.lower()}
     if identity["id"]:
         mine.add("%d+%s@users.noreply.github.com" % (identity["id"], owner.lower()))
-    mine |= {e.strip().lower() for e in os.environ.get("CARDS_AUTHOR_EMAILS", "").split(",") if e.strip()}
     human = [c for c in commits if not c.bot]
-    uses = Counter(c.email for c in human)
-    samples = {}
+    # a noreply address of the id+login form names its account by an id no change of login alters, so it needs no
+    # lookup; one of the older login-only form is looked up like any address, since the owner's own from before a
+    # change of login no longer resolves, and then counts by the rules below
+    noreply = {}
+    for e in {c.email for c in human}:
+        m = NOREPLY.fullmatch(e)
+        if m and identity["id"]:
+            noreply[e] = int(m.group(1)) == identity["id"]
+    mine |= {e for e, own in noreply.items() if own}
+    listed = author_emails()
+    uses, where, called, per_repo, samples = Counter(), {}, {}, {}, {}
     for c in human:
+        uses[c.email] += 1
+        where.setdefault(c.email, set()).add(c.repo)
+        called.setdefault(c.email, set()).add(c.name.casefold())
+        per_repo.setdefault(c.repo, set()).add(c.email)
         samples.setdefault(c.email, (repos[c.repo]["name"], c.sha))
-    asked = {e: samples[e] for e, _ in uses.most_common() if e not in mine}
+
+    def own_names():   # the names the owner's own commits, login and profile use, that tell a person
+        found = {n for n in (c.name.casefold() for c in human if c.email in mine)
+                 if n not in GENERIC_NAMES and not agent_name(n)}
+        return (found | {owner.casefold(), identity["name"].casefold()}) - {""}
+    alone = {next(iter(emails)) for emails in per_repo.values() if len(emails) == 1}
+    known = own_names()
+    rank = lambda e: (e not in listed, -len(where[e]), not called[e] & known, e not in alone, -uses[e], e)
+    asked = {e: samples[e] for e in sorted(uses, key=rank) if e not in mine and e not in noreply}
     try:
         login = resolve_authors(owner, asked)
-    except RuntimeError:
+    except (RuntimeError, ValueError, KeyError, TypeError, AttributeError):
         return None
     for email, who in login.items():
         if who and who.lower() == owner.lower():
             mine.add(email)
-    names = {c.name.casefold() for c in human if c.email in mine} | {owner.casefold(), identity["name"].casefold()}
-    names.discard("")
-    per_repo = {}
+    theirs = ({e for e, who in login.items() if who and who.lower() != owner.lower()}
+              | {e for e, own in noreply.items() if not own})
+    mine |= listed - theirs
+    unknown = set(asked) - set(login) - mine
+    names = own_names()
+    owned, agents = set(), set()
     for c in human:
-        per_repo.setdefault(c.repo, set()).add(c.email)
-    return {(c.repo, c.email) for c in human
-            if c.email in mine or (not login.get(c.email) and (len(per_repo[c.repo]) == 1 or c.name.casefold() in names))}
+        pair = (c.repo, c.email)
+        if c.email in mine or (c.email not in theirs and c.name.casefold() in names):
+            owned.add(pair)
+        elif c.email in theirs or c.email in unknown:
+            continue
+        elif agent_name(c.name):
+            agents.add(pair)
+        elif len(per_repo[c.repo]) == 1:
+            owned.add(pair)
+    if notes is not None:
+        notes.update(agents=agents, refused=len(listed & theirs & set(uses)), unknown=unknown)
+    return owned
 
 
 def slot(work, owner, name):
@@ -2324,13 +2507,12 @@ def line_hash(text):
 
 
 def limit():
-    """How long a command may run: TIMEOUT, or less when the run's deadline is nearer."""
-    if DEADLINE is None:
-        return TIMEOUT
-    left = DEADLINE - time.monotonic() - RESERVE
-    if left < 5:
-        raise RuntimeError("git was not started: the run is out of time")
-    return min(TIMEOUT, int(left))
+    """How long a command may run: TIMEOUT, or less when the run's deadline is nearer (see time_left)."""
+    try:
+        left = time_left()
+    except OutOfTime:
+        raise OutOfTime("git was not started: the run is out of time") from None
+    return TIMEOUT if left is None else min(TIMEOUT, left)
 
 
 def git_lines(args, handle, feed=None, env=None):
@@ -3475,6 +3657,9 @@ def rust_test_files(files, declared, roots):
 
 
 NO_LINES = ((), ())   # a file version whose diff added and removed no line of code
+# The empty file, in SHA-1 and SHA-256 repositories: every template and project holds one (a .gitkeep, an empty
+# __init__.py), so it tells no copy (see collect).
+EMPTY_BLOBS = {hashlib.sha1(b"blob 0\0").hexdigest(), hashlib.sha256(b"blob 0\0").hexdigest()}
 
 
 def move_credit(pool, added, sha, files):
@@ -3599,6 +3784,15 @@ def same_change(a, b):
     return 2 * len(a & b) >= min(len(a), len(b))
 
 
+def spend(counter, h):
+    """Takes one h out of counter, if it holds one: whether a line an earlier landing of the same change counted is
+    being landed again (see collect)."""
+    if counter[h] > 0:
+        counter[h] -= 1
+        return True
+    return False
+
+
 def collect(owner, repos, work, since=None):
     """Every counted file version as (time, language, lines of code), oldest first, plus the times of the
     owner's commits and of skipped imports, over the whole history; the window is applied afterwards. A file
@@ -3614,15 +3808,26 @@ def collect(owner, repos, work, since=None):
     reformatted one already matches, spacing aside.
 
     Only the owner's own commits count (see authorship); others', automation's and copies' add no lines and
-    no commits, and their file versions count as seen, so no later commit is credited with them. A commit
-    held by more than one repository, as in a fork or a mirror, counts once, and so does one change landed
-    twice under new hashes (a cherry-pick, a rebase with the branch kept, an amend still reachable from a
-    tag), known by its author's address, author time and subject and by sharing most of its lines of code (see
-    same_change): different changes that only share the first three, one message committed in several repositories
-    at once, both count. Commits of one author second are read parent first, as git lists them (read_commits).
+    no commits, and their file versions count as seen, so no later commit is credited with them. A commit held by
+    more than one repository, as in a fork or a mirror, counts once, and is the owner's if it is theirs in any of
+    them. So does one change landed twice under new hashes (a cherry-pick, a rebase with the branch kept, an amend
+    still reachable from a tag), known by its author's address, author time and subject and by sharing most of its
+    lines of code (see same_change): different changes that only share the first three, one message committed in
+    several repositories at once, both count. A second landing adds no commit, and of its lines only those no earlier
+    landing counted as written. Commits of one author second are read parent first, as git lists them (read_commits).
     File versions another account wrote, from the template a repository was made from or from coderprint itself
-    in a relay copy, count as seen before anything is read; a commit that adds nothing else is not the owner's work
-    and does not count. A repository that cannot be read, even on a second try, is left out and counted in "unread".
+    in a relay copy, count as seen before anything is read; a commit that adds nothing else (the empty file aside,
+    which every template holds) is not the owner's work and does not count. A repository that cannot be read, even
+    on a second try, is left out and counted in "unread"; one made from a template whose files cannot be listed or
+    seen, or a relay copy when coderprint's own cannot be, is left out too and named in "unsure".
+
+    A lookup that tells the owner's code from others' and that GitHub cannot answer, even on a second try, is named
+    in "unchecked" (UNCHECKED), since everything would then count as the owner's; main then keeps the existing
+    panels. The lookups that need no commits are made before any repository is read, and a run that cannot make them
+    reads nothing; while repositories are read LOOKUP_RESERVE is kept back for the one that needs them, so a run
+    that reads until its deadline still asks it and leaves out only the repositories it had no time for.
+    "authors" says how many addresses GitHub was not asked about ("unknown"), how many commits count under them
+    ("commits"), and how many addresses CARDS_AUTHOR_EMAILS lists that belong to another account ("refused").
     The file versions a repository's .gitattributes marks as vendored, generated or documentation
     (attributed_versions) count nowhere, and neither do generated files (generated_output). A version that counts is
     taken before the same content under a path that does not, in one commit (src/ beside dist/). A file moved to a
@@ -3636,55 +3841,101 @@ def collect(owner, repos, work, since=None):
     fallback (see read_added_code), numstat's counts for a repository whose diffs cannot be read among them, and
     code["approximate_in_use"] the lines in use read so, code["approximate_imports"] the lines of imports counted by
     numstat; code["attributes_unread"] counts the repositories whose .gitattributes git could not read."""
+    global RESERVE
     all_commits, mismatched, unread, ignore = [], 0, 0, set()
     code, head = {}, {}   # by repository: what each file version adds, and what stands at the head
     skip, attributes_unread = {}, 0   # by repository: the (commit, path) its .gitattributes marks as not its own
     order = {}   # (repository, commit): its place in git's listing, children first (see read_commits)
-    for i, r in enumerate(repos):
-        if r.get("isDisabled") or r.get("isLocked"):
-            continue   # counted in the listing, never cloned
-        dest = slot(work, owner, r["name"])
-        try:
-            commits, bad, sweeps = read_repository(owner, r["name"], dest, i)
-            marked = attributed_versions(dest, commits) if commits else set()
-            skip[i] = marked or set()
-            if commits:   # read while the clone is still on disk; each apart, so a head that cannot be read costs
-                # no diffs. read_added_code pairs the changed lines of the commits that could be sweeps (see sweep).
-                SWEEP_WATCH.clear()
-                SWEEP_WATCH.update(c.sha for c in commits if could_sweep([f for f in c.files if f.added is not None
-                                                                          and language_of(f.path)
-                                                                          and (c.sha, f.path) not in skip[i]]))
-                try:
-                    code[i] = read_added_code(dest)
-                except RuntimeError:
-                    code[i] = None
-                finally:
-                    SWEEP_WATCH.clear()
-                try:
-                    head[i] = read_head_code(dest)
-                except RuntimeError:
-                    head[i] = None
-            else:   # an empty repository, or one of tags alone: read, and nothing in it
-                code[i], head[i] = {}, Standing()
-            if marked is None or getattr(head[i], "unattributed", False):
-                attributes_unread += 1
-        except RuntimeError:
-            unread += 1
-            continue
-        finally:
-            if not os.environ.get("CLONE_CACHE") and os.path.isdir(dest):
-                remove_tree(dest)   # one clone on disk at a time
-        for k, c in enumerate(commits):
-            order[(i, c.sha)] = k
-        all_commits += commits
-        mismatched += bad
-        ignore |= sweeps
-
-    seeded = set()
-    sources = set(templates(owner).values()) | ({UPSTREAM} if owner.lower() != UPSTREAM.split("/")[0].lower() else set())
+    # The lookups that need no commits come first, so a run that reads until its deadline still has them, and a run
+    # that could not tell the owner's code from others' stops before it reads anything (see main).
+    unchecked = set()   # the lookups GitHub could not answer (UNCHECKED)
+    made, identity = templates(owner), owner_identity(owner)
+    if made is None:
+        unchecked.add("templates")
+    if identity is None:
+        unchecked.add("authorship")
+    if unchecked:
+        return {"events": [], "commits": [], "imports": [], "import_lines": [], "mismatched": 0, "unread": 0,
+                "left_out": {}, "unchecked": sorted(unchecked), "unsure": set(), "copies": set(),
+                "authors": {"unknown": 0, "commits": 0, "refused": 0},
+                "code": {"production": 0, "tests": 0, "unread": 0, "heads_unread": 0, "approximate": [],
+                         "approximate_in_use": 0, "approximate_imports": [], "attributes_unread": 0},
+                "now": dt.datetime.now(dt.timezone.utc).timestamp()}
+    seeded, unlisted = set(), set()   # the file versions other accounts wrote; the sources that could not be listed
+    sources = {t for t in made.values() if t} | ({UPSTREAM} if owner.lower() != UPSTREAM.split("/")[0].lower() else set())
     for k, full_name in enumerate(sorted(sources)):
-        seeded |= seed_blobs(full_name, os.path.join(work, "seed-%d.git" % k)) or set()
-    mine = authorship(owner, all_commits, owner_identity(owner), repos)
+        blobs = seed_blobs(full_name, os.path.join(work, "seed-%d.git" % k))
+        if blobs is None:
+            unlisted.add(full_name)
+        else:
+            seeded |= blobs
+    # A repository made from a template whose files cannot be listed, or seen at all, holds files no one can tell from
+    # the owner's own, so it is left out and counted, as one that cannot be read is; so is a relay copy when
+    # coderprint's own files cannot be listed (below). Guessing either way would count others' code or drop the owner's.
+    readable = {r["name"] for r in repos if not (r.get("isDisabled") or r.get("isLocked"))}
+    unsure = {name for name, t in made.items() if t is None or t in unlisted} & readable
+    saved, RESERVE = RESERVE, RESERVE + LOOKUP_RESERVE   # reading stops in time for the lookup after it (authorship)
+    try:
+        for i, r in enumerate(repos):
+            if r.get("isDisabled") or r.get("isLocked") or r["name"] in unsure:
+                continue   # counted in the listing, never cloned
+            dest = slot(work, owner, r["name"])
+            try:
+                commits, bad, sweeps = read_repository(owner, r["name"], dest, i)
+                marked = attributed_versions(dest, commits) if commits else set()
+                skip[i] = marked or set()
+                if commits:   # read while the clone is still on disk; each apart, so a head that cannot be read costs
+                    # no diffs. read_added_code pairs the changed lines of the commits that could be sweeps (sweep).
+                    SWEEP_WATCH.clear()
+                    SWEEP_WATCH.update(c.sha for c in commits if could_sweep([f for f in c.files if f.added is not None
+                                                                              and language_of(f.path)
+                                                                              and (c.sha, f.path) not in skip[i]]))
+                    try:
+                        code[i] = read_added_code(dest)
+                    except RuntimeError:
+                        code[i] = None
+                    finally:
+                        SWEEP_WATCH.clear()
+                    try:
+                        head[i] = read_head_code(dest)
+                    except RuntimeError:
+                        head[i] = None
+                else:   # an empty repository, or one of tags alone: read, and nothing in it
+                    code[i], head[i] = {}, Standing()
+                if marked is None or getattr(head[i], "unattributed", False):
+                    attributes_unread += 1
+            except RuntimeError:
+                unread += 1
+                continue
+            finally:
+                if not os.environ.get("CLONE_CACHE") and os.path.isdir(dest):
+                    remove_tree(dest)   # one clone on disk at a time
+            for k, c in enumerate(commits):
+                order[(i, c.sha)] = k
+            all_commits += commits
+            mismatched += bad
+            ignore |= sweeps
+    finally:
+        RESERVE = saved
+
+    if UPSTREAM in unlisted:   # a relay copy, known by holding both of RELAY_FILES, is left out (see above)
+        held = {}
+        for c in all_commits:
+            held.setdefault(c.repo, set()).update(f.path for f in c.files if f.path in RELAY_FILES)
+        relay = {i for i, paths in held.items() if paths >= RELAY_FILES}
+        unsure |= {repos[i]["name"] for i in relay}
+        all_commits = [c for c in all_commits if c.repo not in relay]
+        for i in relay:
+            code.pop(i, None)
+            head.pop(i, None)
+    notes = {}
+    mine = authorship(owner, all_commits, identity, repos, notes)
+    if identity["user"] and mine is None:
+        unchecked.add("authorship")   # every commit would count, others' included
+    # a commit held by several repositories is the owner's if it is theirs in any of them, whichever is read first
+    owned = None if mine is None else {c.sha for c in all_commits if (c.repo, c.email) in mine}
+    agents = {c.sha for c in all_commits if (c.repo, c.email) in notes.get("agents", ())}
+    unknown, unverified = notes.get("unknown", set()), 0   # addresses GitHub was not asked about, and their commits
 
     moves = {}   # (repository, commit): the paths of the files it moved (moved_files)
 
@@ -3696,7 +3947,9 @@ def collect(owner, repos, work, since=None):
     parts = import_runs([c for c in all_commits if not c.bot], lambda c: len(new_code_files(
         c, code.get(c.repo), skip.get(c.repo) or (), moved(c))))
     twins = {k for k, n in Counter((c.email, c.ts, c.subject) for c in all_commits).items() if n > 1}
-    seen, shas, keys = set(seeded), set(), {}   # keys: (address, author time, subject) -> each landing's change
+    # keys: (address, author time, subject) -> each change counted under it, as [its lines (change_of), or None where
+    # they are unknown, and a Counter of the lines of code its landings counted as written, or None]
+    seen, shas, keys = set(seeded), set(), {}
     events, commit_times, import_times, import_lines, approximate, rough_imports = [], [], [], [], [], []
     left_out = Counter()
     pool = Counter()   # the lines of code counted as written in the window, in every repository, by line_hash and
@@ -3712,20 +3965,44 @@ def collect(owner, repos, work, since=None):
         key = (c.email, c.ts, c.subject)
         added = code.get(c.repo)
         change = change_of(c, added) if key in twins else None
-        copied = bool(live) and all(f.blob in seeded for f in live)
+        # the empty file is in every template, so a commit adding only empty files beside others' is no copy
+        kept = [f for f in live if f.blob not in EMPTY_BLOBS]
+        copied = bool(kept) and all(f.blob in seeded for f in kept)
         if live:
             holding.add(c.repo)
             if not copied:
                 writing.add(c.repo)
-        why = ("automation" if c.bot else "others" if mine is not None and (c.repo, c.email) not in mine
-               else "copied" if copied
-               else "landed_twice" if any(same_change(change, other) for other in keys.get(key, ())) else None)
+        theirs_commit = owned is not None and c.sha not in owned
+        why = ("automation" if c.bot or (theirs_commit and c.sha in agents) else "others" if theirs_commit
+               else "copied" if copied else None)
         if why:   # seen all the same, so no later commit is credited with this content
             seen.update(f.blob for f in fresh)
             left_out[why] += 1
             continue
-        keys.setdefault(key, []).append(change)
-        commit_times.append(c.ts)
+        # One change landed again under a new hash (same_change) is no commit of its own, and what its earlier landings
+        # counted as written is not written again; what it adds that they did not, an amend's new file or a line a
+        # conflict's resolution wrote, is new writing, under every rule below. Where either's lines are unknown there
+        # is nothing to tell its new lines by, so it adds nothing.
+        record, repeat, wrote = None, None, None
+        if key in twins:
+            landings = [rec for rec in keys.get(key, ()) if same_change(change, rec[0])]
+            if landings:
+                left_out["landed_twice"] += 1
+                if change is None or any(rec[1] is None for rec in landings):
+                    seen.update(f.blob for f in fresh)
+                    continue
+                record, repeat = landings[0], Counter()
+                for rec in landings:
+                    repeat |= rec[1]
+                record[0] = record[0] | change
+            else:
+                record = [change, None if change is None else Counter()]
+                keys.setdefault(key, []).append(record)
+            wrote = Counter() if record[1] is not None else None
+        if repeat is None:
+            commit_times.append(c.ts)
+            if c.email in unknown:
+                unverified += 1
         theirs = skip.get(c.repo) or ()
         counted = [f for f in fresh if f.added is not None and language_of(f.path) and (c.sha, f.path) not in theirs]
         # the import rule counts new files of code only: prose, data, generated files and files moved from ones the
@@ -3736,7 +4013,9 @@ def collect(owner, repos, work, since=None):
                                            > IMPORT_FILES)
         in_window = added is not None and (since is None or c.ts >= since)
         if c.sha in ignore or brought:
-            if brought:   # an existing codebase brought in, not written: its lines of code, as written would count them
+            if repeat is not None:
+                pass   # its first landing already brought it in, or handed its lines on
+            elif brought:   # an existing codebase brought in, not written: its lines of code, as written would count them
                 import_times.append(c.ts)
                 if added is None:   # numstat's count, comments and blank lines and all
                     lines = sum(f.added for f in code_files)
@@ -3750,7 +4029,7 @@ def collect(owner, repos, work, since=None):
             seen.update(f.blob for f in fresh)
             continue
         swept = sweep(counted, added.get(ALIKE, {}) if added is not None else None, c.sha)
-        if in_window and swept:
+        if in_window and swept and repeat is None:
             move_credit(pool, added, c.sha, swept)
         rough = added.get(APPROXIMATE, {}) if added is not None else {}
         gone = Counter(added.get((c.sha, DELETED), NO_LINES)[1]) if added is not None and moved(c) else None
@@ -3772,6 +4051,10 @@ def collect(owner, repos, work, since=None):
                 plus = added.get((c.sha, f.blob), NO_LINES)[0]
                 if gone is not None and f.status == "A" and f.path in moved(c):
                     plus = moved_out(plus, gone)   # moved here from a file this commit deleted: only its changes
+                if wrote is not None:
+                    wrote.update(plus)
+                if repeat is not None:   # only what no earlier landing of this change counted
+                    plus = [h for h in plus if not spend(repeat, h)]
                 lines = len(plus)
                 if in_window:
                     kind = is_test(f.path, lang)
@@ -3780,6 +4063,8 @@ def collect(owner, repos, work, since=None):
                     approximate.append((c.ts, min(lines, rough[(c.sha, f.blob)])))
             if lines:
                 events.append((c.ts, lang, lines))
+        if wrote:
+            record[1] |= wrote
     # what still stands: each line of code at a head that matches a written line not already taken, one written in
     # code of its own kind (production or tests) first, so a line common to both, such as a lone brace, is split by
     # where it was written rather than by which file sorts first; the totals are the same either way. A line a
@@ -3806,8 +4091,9 @@ def collect(owner, repos, work, since=None):
                     in_use[test] += 1
                     rough_in_use += loose[k]
     return {"events": events, "commits": commit_times, "imports": import_times, "import_lines": import_lines,
-            "mismatched": mismatched, "unread": unread, "left_out": dict(left_out),
-            "copies": {repos[k]["name"] for k in holding - writing},
+            "mismatched": mismatched, "unread": unread, "left_out": dict(left_out), "unchecked": sorted(unchecked),
+            "unsure": unsure, "copies": {repos[k]["name"] for k in holding - writing},
+            "authors": {"unknown": len(unknown), "commits": unverified, "refused": notes.get("refused", 0)},
             "code": {"production": in_use[0], "tests": in_use[1], "unread": sum(1 for v in code.values() if v is None),
                      "heads_unread": sum(1 for v in head.values() if v is None),
                      "approximate": approximate, "approximate_in_use": rough_in_use,
@@ -5919,8 +6205,9 @@ DEFINITIONS = {
                   "paired the two names.",
         "leaves_out": "Commits by other accounts or by automation; reformatting sweeps (ten or more files at once, "
                       "each adding about what it deletes and its changed lines still reading nearly as they did) and "
-                      "commits listed in .git-blame-ignore-revs; a change landed twice; imports (see import); files "
-                      "from a template or from a relay copy of coderprint."},
+                      "commits listed in .git-blame-ignore-revs; what a change landed twice lands again (only lines "
+                      "its first landing did not count are new); imports (see import); files from a template or from "
+                      "a relay copy of coderprint."},
     "import": {
         "means": "An existing codebase brought in, not written: a commit adding more than 500 new files of code, or a "
                  "run of the author's commits to one repository, each adding at least 50 new files of code within an "
@@ -5963,7 +6250,16 @@ DEFINITIONS = {
         "means": "A commit that is not a merge, on any branch (gh-pages, and what only it holds, only when it is the "
                  "default), by the owner: counted once however many repositories hold it, and once when the same "
                  "change landed twice (one author, author second and subject, and most of the same lines of code).",
-        "leaves_out": "Commits by other accounts or by automation, and commits dated in the future."},
+        "leaves_out": "Commits by other accounts or by automation (a bot, a workflow, or a bot or coding agent "
+                      "committing under an identity of its own that no account holds), and commits dated in the "
+                      "future."},
+    "unverified_author": {
+        "means": "An author address GitHub was not asked about, since a run asks about at most 1,000 addresses, those "
+                 "likeliest to change what counts first, or did not answer for.",
+        "method": "Its commits count as the owner's only under the owner's own name or login, never as the only "
+                  "address in a repository, as an address GitHub says belongs to no account would. addresses counts "
+                  "them, and commits the commits counted under them.",
+        "limits": "Such an address may belong to another account whose holder uses the owner's name."},
     "active_day": {"means": "A day with at least one counted commit."},
     "streak": {"means": "A run of consecutive active days. The current streak may end yesterday, since today is not "
                         "over."},
@@ -6020,6 +6316,7 @@ def card_data(owner, window, now, zone, start, S, repos, private, data, stats, s
     drawn = percents({l: totals[l] / grand for l in names}) if grand else {}
     loc = data.get("code") or {}
     rough = sum(n for t, n in loc.get("approximate", ()) if start <= t <= now + FUTURE_SLACK)
+    unsure, authors = data.get("unsure") or (), data.get("authors") or {}
     return {
         "schema": SCHEMA,
         "schema_note": "Fields are only ever added within %s; ignore any you do not know. #/definitions says what each "
@@ -6032,13 +6329,17 @@ def card_data(owner, window, now, zone, start, S, repos, private, data, stats, s
                    "from": iso_day(start, zone) if start != float("-inf") else None, "to": iso_day(now, zone),
                    "definition": "#/definitions/day"},
         "scope": {
-            "repositories": {"visible": len(repos), "read": readable - data["unread"], "unread": data["unread"],
+            "repositories": {"visible": len(repos), "read": readable - data["unread"] - len(unsure),
+                             "unread": data["unread"],
                              "read_without_line_diffs": loc.get("unread", 0),
                              "read_without_head": loc.get("heads_unread", 0),
-                             "read_without_gitattributes": loc.get("attributes_unread", 0)},
+                             "read_without_gitattributes": loc.get("attributes_unread", 0),
+                             "left_out_as_unattributable": len(unsure)},
             "owned_only": True, "forks": "excluded", "visibility": "public and private" if private else "public only",
             "branches": "every branch; gh-pages only when it is the default",
-            "authorship": "the owner's own commits (an organization's card counts every member)"},
+            "authorship": "the owner's own commits (an organization's card counts every member)",
+            "unverified_authors": {"addresses": authors.get("unknown", 0), "commits": authors.get("commits", 0),
+                                   "definition": "#/definitions/unverified_author"}},
         "quantity": {
             "written_loc": figure(written, "lines of code", "measured", "written", approximate_loc=min(rough, written)),
             "in_use_loc": figure(use, "lines of code", "measured", "in_use", equals="production_loc + test_loc",
@@ -6442,14 +6743,29 @@ def main():
         if not os.environ.get("CLONE_CACHE"):
             remove_tree(work)
     readable = sum(1 for r in repos if not (r.get("isDisabled") or r.get("isLocked")))
+    if data.get("unchecked"):   # the run cannot tell the owner's code from others', so it publishes nothing
+        say("::warning::GitHub could not be asked %s, even on a second try, so this run cannot tell the owner's code "
+            "from what others wrote, and the existing panels are kept. The next run tries again."
+            % " or ".join(UNCHECKED[u] for u in data["unchecked"]))
+        return 1
+    unsure = data.get("unsure") or set()
     if data["unread"]:
         say("::warning::%d of %d repositories could not be read, even on a second try, and %s left out of the panel"
             % (data["unread"], readable, "is" if data["unread"] == 1 else "are"))
-        if data["unread"] > max(1, int(UNREAD_SHARE * readable)):
-            say("That is too many to draw without, so the existing panels are kept. The next run tries again.")
-            return 1
-    # a repository holding only others' file versions (a relay copy) makes nothing of the owner's private
-    private = sum(1 for r in repos if r["isPrivate"] and r["name"] not in data["copies"])
+    if unsure:
+        say("::warning::%d of %d repositories may hold files from a template, or from coderprint in a relay copy, that "
+            "GitHub could not list, so the owner's code there cannot be told apart, and %s left out of the panel"
+            % (len(unsure), readable, "is" if len(unsure) == 1 else "are"))
+    if data["unread"] + len(unsure) > max(1, int(UNREAD_SHARE * readable)):
+        say("That is too many to draw without, so the existing panels are kept. The next run tries again.")
+        return 1
+    refused = (data.get("authors") or {}).get("refused", 0)
+    if refused:   # a count only: an address is never printed
+        say("::warning::%d %s in author-emails %s to another GitHub account, and %s commits are not counted as the "
+            "owner's" % ((refused, "address", "belongs", "its") if refused == 1 else
+                         (refused, "addresses", "belong", "their")))
+    # a repository holding only others' file versions (a relay copy), or left out, makes nothing of the owner's private
+    private = sum(1 for r in repos if r["isPrivate"] and r["name"] not in data["copies"] and r["name"] not in unsure)
 
     now, days_back = data["now"], WINDOWS[window][2]
     # The zone comes first: every time is moved to the start of its own day there, so nothing drawn or written
