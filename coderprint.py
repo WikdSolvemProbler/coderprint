@@ -9,8 +9,9 @@ It runs as a GitHub Action in the profile repository (see action.yml), or locall
 repository's folder while signed in with gh. It reads with GH_TOKEN, ideally a read-only token from the
 account's own GitHub App, and writes assets/panel-light.svg, assets/panel-dark.svg, their compact
 versions for phones (assets/panel-compact-light.svg and assets/panel-compact-dark.svg), assets/coderprint.json,
-an empty assets/blank.svg when the README block needs one (see Layout), and a marked block in README.md,
-leaving the rest of the README alone. It needs only the Python standard library, gh and git, and no
+an empty assets/blank.svg when the README block needs one (see Layout), and a marked block in README.md
+(profile/README.md in an organization's .github repository, see profile_repository), leaving the rest of the
+README alone. It needs only the Python standard library, gh and git, and no
 outside service ever sees the code.
 
 Privacy: Actions logs on a public repository are public, so this script never prints or writes a
@@ -621,7 +622,8 @@ README_TWO = (
     '<source media="(max-width: 540px)" srcset="{compact_light}">'
     '<img width="100%" alt="{alt}" src="{wide_light}">'
     '</picture></a>')
-RAW_ASSETS = "https://raw.githubusercontent.com/{owner}/{owner}/HEAD/assets/"   # the profile repository's
+# the profile repository's: owner/owner for a person, owner/.github for an organization (profile_repository)
+RAW_ASSETS = "https://raw.githubusercontent.com/{owner}/{repo}/HEAD/assets/"
 BLANK_SVG = b'<svg xmlns="http://www.w3.org/2000/svg" width="896" height="1" viewBox="0 0 896 1"/>\n'
 # With a music card but no relay, two images side by side. One line with no whitespace between the tags:
 # GitHub pads any image with align="right" by 20px, so a float would push the panel below the card, and
@@ -631,9 +633,9 @@ BLANK_SVG = b'<svg xmlns="http://www.w3.org/2000/svg" width="896" height="1" vie
 README_PAIR = (
     '<p align="right">'
     '<a href="{link}"><picture>'
-    '<source media="(prefers-color-scheme: dark)" srcset="assets/panel-dark.svg">'
-    '<source media="(prefers-color-scheme: light)" srcset="assets/panel-light.svg">'
-    '<img width="64.1%" alt="{alt}" src="assets/panel-dark.svg">'
+    '<source media="(prefers-color-scheme: dark)" srcset="{base}assets/panel-dark.svg">'
+    '<source media="(prefers-color-scheme: light)" srcset="{base}assets/panel-light.svg">'
+    '<img width="64.1%" alt="{alt}" src="{base}assets/panel-dark.svg">'
     '</picture></a>'
     '<a href="{music_link}"><picture>'
     '<source media="(prefers-color-scheme: dark)" srcset="{music_dark}">'
@@ -666,41 +668,176 @@ class Failed(RuntimeError):
         self.output = output
 
 
-def time_left():
-    """How long a command may still run under the run's deadline (see time_limit): what is left less RESERVE, or
-    None without a deadline. Fails as OutOfTime when that is under five seconds."""
+def time_left(reserve=None):
+    """How long a command may still run under the run's deadline (see time_limit): what is left less reserve
+    (RESERVE unless given), or None without a deadline. Fails as OutOfTime when that is under five seconds."""
     if DEADLINE is None:
         return None
-    left = DEADLINE - time.monotonic() - RESERVE
+    left = DEADLINE - time.monotonic() - (RESERVE if reserve is None else reserve)
     if left < 5:
         raise OutOfTime("the run is out of time")
     return int(left)
 
 
-def run(args, cwd=None, env=None, timeout=TIMEOUT):
+def run(args, cwd=None, env=None, timeout=TIMEOUT, reserve=None):
     """Run a command. Failures carry only the program's name: argv can hold a clone URL, which would
     name a private repository in a public log, so no exception that carries argv leaves here. Under a
-    deadline (see time_limit) a command gets no longer than the run has left, less RESERVE, and one the deadline
-    cuts short fails as OutOfTime."""
+    deadline (see time_limit) a command gets no longer than the run has left, less reserve (RESERVE unless
+    given), and one the deadline cuts short fails as OutOfTime. A command that runs past its time is ended with
+    everything it started (kill_tree)."""
     what = os.path.basename(args[0])
     try:
-        left = time_left()
+        left = time_left(reserve)
     except OutOfTime:
         raise OutOfTime("%s was not started: the run is out of time" % what) from None
     cut = left is not None and (timeout is None or left < timeout)
     if cut:
         timeout = left
     try:
-        p = subprocess.run(args, cwd=cwd, env=env, capture_output=True, timeout=timeout)
+        p = spawn(args, cwd=cwd, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    except OSError:
+        raise RuntimeError("%s could not be started" % what) from None
+    try:
+        out, _ = p.communicate(timeout=timeout)
     except subprocess.TimeoutExpired:
+        kill_tree(p)
+        settle(p)
         if cut:
             raise OutOfTime("%s timed out after %d seconds: the run is out of time" % (what, timeout)) from None
         raise RuntimeError("%s timed out after %d seconds" % (what, timeout)) from None
-    except OSError:
-        raise RuntimeError("%s could not be started" % what) from None
+    except BaseException:   # the step's time limit (Stopped) or an interrupt: nothing is left running
+        kill_tree(p)
+        settle(p)
+        raise
+    finally:
+        release(p)
     if p.returncode != 0:
-        raise Failed("%s exited %d" % (what, p.returncode), p.stdout)
-    return p.stdout
+        raise Failed("%s exited %d" % (what, p.returncode), out)
+    return out
+
+
+# How a command is ended with everything it started. On Windows a killed program's children live on and keep
+# its output pipes: git-remote-https under a clone, and the real git under Git for Windows' cmd\git.exe, which
+# PowerShell and cmd find first. Reading to the end, or waiting for the pipes as subprocess.run does after a
+# timeout, would then outlast any limit. So each command starts suspended inside a job object of its own, joined
+# before it runs a single instruction, and ending the job ends every process it holds, even one whose parent has
+# already exited. Where a job cannot be made, the command starts as it always did and is ended by its process tree
+# (taskkill /T), which finds what its live processes started; and a pipe that something still holds after that is
+# waited on for KILL_GRACE seconds at most. Elsewhere a command is killed as subprocess.run kills it.
+CREATE_SUSPENDED = 0x00000004
+KILL_GRACE = 5
+_WIN32 = None
+
+
+def win32():
+    """kernel32's job object calls and ntdll's NtResumeProcess, set up once; False where they cannot be had."""
+    global _WIN32
+    if _WIN32 is None:
+        _WIN32 = False
+        if os.name == "nt":
+            try:
+                import ctypes
+                from ctypes import wintypes
+                k = ctypes.WinDLL("kernel32", use_last_error=True)
+                n = ctypes.WinDLL("ntdll")
+                for fn, args, res in ((k.CreateJobObjectW, [ctypes.c_void_p, wintypes.LPCWSTR], wintypes.HANDLE),
+                                      (k.AssignProcessToJobObject, [wintypes.HANDLE, wintypes.HANDLE], wintypes.BOOL),
+                                      (k.TerminateJobObject, [wintypes.HANDLE, wintypes.UINT], wintypes.BOOL),
+                                      (k.TerminateProcess, [wintypes.HANDLE, wintypes.UINT], wintypes.BOOL),
+                                      (k.CloseHandle, [wintypes.HANDLE], wintypes.BOOL),
+                                      (n.NtResumeProcess, [wintypes.HANDLE], ctypes.c_long)):
+                    fn.argtypes, fn.restype = args, res
+                _WIN32 = (k, n)
+            except Exception:   # no ctypes, or a Windows without these calls: the process tree instead
+                _WIN32 = False
+    return _WIN32
+
+
+def spawn(args, **popen):
+    """subprocess.Popen, and on Windows inside a job object of its own (see above), kept as the process's
+    coderprint_job for kill_tree and release. A command that cannot be resumed after joining is ended before it
+    ran and started again the plain way."""
+    api = win32() if os.name == "nt" else False
+    job = api[0].CreateJobObjectW(None, None) if api else None
+    if not job:
+        return subprocess.Popen(args, **popen)
+    kernel, ntdll = api
+    flags = popen.pop("creationflags", 0)
+    try:
+        proc = subprocess.Popen(args, creationflags=flags | CREATE_SUSPENDED, **popen)
+    except BaseException:
+        kernel.CloseHandle(job)
+        raise
+    handle = getattr(proc, "_handle", None)
+    if handle is None:   # not a process this module can reach (a stand-in for Popen): nothing to join or resume
+        kernel.CloseHandle(job)
+        return proc
+    handle = int(handle)
+    joined = bool(kernel.AssignProcessToJobObject(job, handle))
+    if ntdll.NtResumeProcess(handle) != 0:   # still suspended: it has run nothing, so start it again
+        kernel.TerminateProcess(handle, 1)
+        try:
+            proc.wait(timeout=KILL_GRACE)
+        except subprocess.TimeoutExpired:
+            pass
+        for pipe in (proc.stdin, proc.stdout, proc.stderr):
+            if pipe:
+                pipe.close()
+        kernel.CloseHandle(job)
+        return subprocess.Popen(args, creationflags=flags, **popen)
+    if joined:
+        proc.coderprint_job = job
+    else:
+        kernel.CloseHandle(job)
+    return proc
+
+
+def kill_tree(proc):
+    """End a command and everything it started: its job object on Windows, or failing that its process tree; and
+    the command itself, as subprocess.run does."""
+    job = getattr(proc, "coderprint_job", None)
+    ended = bool(job and win32() and win32()[0].TerminateJobObject(job, 1))
+    if not ended and os.name == "nt" and proc.poll() is None:
+        try:
+            subprocess.run(["taskkill", "/F", "/T", "/PID", str(proc.pid)], stdin=subprocess.DEVNULL,
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=30)
+        except (OSError, subprocess.SubprocessError):
+            pass
+    try:
+        proc.kill()
+    except OSError:
+        pass
+
+
+def settle(proc):
+    """After kill_tree: wait for the command, and on Windows for its output pipes, whose reader threads end once
+    nothing holds them. A pipe still held after KILL_GRACE seconds is left open for its thread to finish with, since
+    closing it would wait as long; elsewhere the pipes are closed, as subprocess.run closes them."""
+    if os.name == "nt":
+        try:
+            proc.communicate(timeout=KILL_GRACE)
+        except subprocess.TimeoutExpired:
+            return
+        except (OSError, ValueError):
+            pass
+    try:
+        proc.wait(timeout=KILL_GRACE)
+    except subprocess.TimeoutExpired:
+        pass
+    for pipe in (proc.stdout, proc.stderr):
+        if pipe:
+            try:
+                pipe.close()
+            except OSError:
+                pass
+
+
+def release(proc):
+    """Close a command's job object once it is done with (its processes are not ended by that)."""
+    job = getattr(proc, "coderprint_job", None)
+    if job and win32():
+        win32()[0].CloseHandle(job)
+        proc.coderprint_job = None
 
 
 def graphql_args(query, variables):
@@ -719,15 +856,17 @@ def graphql_answer(out):
     return data
 
 
-def gql(query, timeout=TIMEOUT, errors=None, **variables):
+def gql(query, timeout=TIMEOUT, errors=None, reserve=None, **variables):
     """GitHub's answer to a query, its data. An answer that carries errors fails, as gh exits 1 on it, unless errors
     is a list: the answer is then taken, since gh prints it all the same, and its errors are added to the list. A
-    field an error names, such as one the token may not see, is null in the data. Fails when there is no data."""
+    field an error names, such as one the token may not see, is null in the data. Fails when there is no data.
+    reserve: the time kept back from the deadline, as run() takes it, RESERVE unless given."""
     args = graphql_args(query, variables)
+    more = {} if reserve is None else {"reserve": reserve}
     if errors is None:
-        return graphql_answer(run(args, timeout=timeout))["data"]
+        return graphql_answer(run(args, timeout=timeout, **more))["data"]
     try:
-        out = run(args, timeout=timeout)
+        out = run(args, timeout=timeout, **more)
     except Failed as e:
         out = e.output
     answer = graphql_answer(out)
@@ -794,8 +933,12 @@ def git_auth():
         return ["-c", "credential.helper=", "-c", "credential.helper=!gh auth git-credential"], None
     env = dict(os.environ)
     basic = base64.b64encode(("x-access-token:" + token).encode()).decode()
-    env.update({"GIT_CONFIG_COUNT": "1", "GIT_CONFIG_KEY_0": "http.https://github.com/.extraheader",
-                "GIT_CONFIG_VALUE_0": "AUTHORIZATION: basic " + basic, "GIT_TERMINAL_PROMPT": "0"})
+    # after any settings the environment already passes this way (a self-hosted runner's certificate bundle or
+    # proxy), not over them; a count git would refuse anyway is replaced
+    count = os.environ.get("GIT_CONFIG_COUNT", "").strip()
+    n = int(count) if re.fullmatch(r"[0-9]{1,4}", count) else 0
+    env.update({"GIT_CONFIG_COUNT": str(n + 1), "GIT_CONFIG_KEY_%d" % n: "http.https://github.com/.extraheader",
+                "GIT_CONFIG_VALUE_%d" % n: "AUTHORIZATION: basic " + basic, "GIT_TERMINAL_PROMPT": "0"})
     return [], env
 
 
@@ -2523,11 +2666,12 @@ def limit():
 def git_lines(args, handle, feed=None, env=None):
     """Runs git and hands each line of its output to handle as it arrives, so an output of any size is never held
     whole. feed, if given, is written to git's input from another thread, so neither pipe can fill and stall.
-    Fails as run() does, naming only the program."""
+    Fails as run() does, naming only the program, and like it ends git with everything git started (kill_tree)
+    when its time is up, so nothing left behind can keep the output open past the limit."""
     seconds = limit()
     try:
-        proc = subprocess.Popen(args, stdin=subprocess.PIPE if feed is not None else subprocess.DEVNULL,
-                                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, env=env)
+        proc = spawn(args, stdin=subprocess.PIPE if feed is not None else subprocess.DEVNULL,
+                     stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, env=env)
     except OSError:
         raise RuntimeError("git could not be started") from None
     if feed is not None:
@@ -2542,7 +2686,7 @@ def git_lines(args, handle, feed=None, env=None):
                 except OSError:
                     pass
         threading.Thread(target=write, daemon=True).start()
-    timer = threading.Timer(seconds, proc.kill)
+    timer = threading.Timer(seconds, kill_tree, (proc,))
     timer.start()
     try:
         handle(proc.stdout)
@@ -2551,17 +2695,20 @@ def git_lines(args, handle, feed=None, env=None):
         proc.wait()   # git ends on its own once its output is read; the timer still bounds the wait
     finally:
         timer.cancel()
+        timer.join()   # a kill already under way finishes before the job it ends is let go
         if proc.poll() is None:
-            proc.kill()
+            kill_tree(proc)
         proc.stdout.close()
         code = proc.wait()
+        release(proc)
     if code != 0:
         raise RuntimeError("git exited %d, or ran past its %d seconds" % (code, seconds))
 
 
 class CatFile:
     """git cat-file --batch kept open on one repository, for the file versions a reading needs whole: one reached
-    only through a merge, or one no longer held (see Versions). Under the run's deadline like any git command."""
+    only through a merge, or one no longer held (see Versions). Under the run's deadline like any git command, and
+    like git_lines ended with everything it started (kill_tree) when its time is up."""
 
     def __init__(self, repo_dir):
         self.repo_dir, self.proc, self.timer, self.failed = repo_dir, None, None, False
@@ -2579,9 +2726,9 @@ class CatFile:
         try:
             if self.proc is None:
                 seconds = limit()
-                self.proc = subprocess.Popen(["git", "-C", self.repo_dir, "cat-file", "--batch"],
-                                             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
-                self.timer = threading.Timer(seconds, self.proc.kill)
+                self.proc = spawn(["git", "-C", self.repo_dir, "cat-file", "--batch"],
+                                  stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+                self.timer = threading.Timer(seconds, kill_tree, (self.proc,))
                 self.timer.daemon = True
                 self.timer.start()
             self.proc.stdin.write(name.encode("utf-8", "surrogateescape") + b"\n")
@@ -2606,6 +2753,7 @@ class CatFile:
     def close(self):
         if self.timer:
             self.timer.cancel()
+            self.timer.join()   # a kill already under way finishes before the job it ends is let go
         if self.proc:
             for pipe in (self.proc.stdin, self.proc.stdout):
                 try:
@@ -2613,8 +2761,9 @@ class CatFile:
                 except OSError:
                     pass
             if self.proc.poll() is None:
-                self.proc.kill()
+                kill_tree(self.proc)
             self.proc.wait()
+            release(self.proc)
 
 
 class Version:
@@ -2720,12 +2869,23 @@ def line_edits(old_lines, new_lines, repo_dir=None):
                 paths.append(os.path.join(folder, name))
                 with open(paths[-1], "wb") as f:
                     f.write("".join(line + "\n" for line in lines).encode("utf-8", "surrogatepass"))
-            p = subprocess.run(["git"] + READ_CONFIG + ["diff", "--no-index", "--no-color", "-U0", "--no-ext-diff",
-                                                        "--no-textconv", paths[0], paths[1]],
-                               capture_output=True, timeout=min(60, limit()), env=read_env())
+            seconds = min(60, limit())
+            # started and ended as run() starts and ends a command (spawn, kill_tree), but taking git's exit 1,
+            # which says the two differ
+            p = spawn(["git"] + READ_CONFIG + ["diff", "--no-index", "--no-color", "-U0", "--no-ext-diff",
+                                               "--no-textconv", paths[0], paths[1]],
+                      stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, env=read_env())
+            try:
+                out, _ = p.communicate(timeout=seconds)
+            except BaseException:
+                kill_tree(p)
+                settle(p)
+                raise
+            finally:
+                release(p)
             if p.returncode in (0, 1):
                 edits = []
-                for m in re.finditer(rb"(?m)^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@", p.stdout):
+                for m in re.finditer(rb"(?m)^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@", out):
                     a, b, c, d = (int(x) if x is not None else 1 for x in m.groups())
                     a0 = a - 1 if b else a
                     c0 = c - 1 if d else c
@@ -5334,11 +5494,12 @@ def profile_offset(owner):
 
 
 def profile_location(owner):
-    """The location on the owner's public profile, or "" when there is none or it cannot be read."""
+    """The location on the owner's public profile, or "" when there is none or it cannot be read. Reading the
+    profile is what RESERVE is kept for, so the query may use it, all but what drawing and writing need."""
     try:
         data = gql("query($owner: String!) { repositoryOwner(login: $owner) { "
                    "... on User { location } ... on Organization { location } } }",
-                   timeout=LOCATION_TIMEOUT, owner=owner)
+                   timeout=LOCATION_TIMEOUT, reserve=RESERVE - PROFILE_TIMEOUT - LOCATION_TIMEOUT, owner=owner)
     except (RuntimeError, ValueError):
         return ""
     found = data.get("repositoryOwner") if isinstance(data, dict) else None
@@ -5378,9 +5539,19 @@ def span_words(S):
 MONTHS = ["JAN", "FEB", "MAR", "APR", "MAY", "JUN", "JUL", "AUG", "SEP", "OCT", "NOV", "DEC"]
 
 
+EPOCH = dt.datetime(1970, 1, 1, tzinfo=dt.timezone.utc)
+
+
+def moment(t, zone):
+    """The moment t, in seconds from the epoch, as a time in zone: what datetime.fromtimestamp gives, but also
+    before the epoch on Windows, whose clock functions refuse more than 12 hours before it, and where the start
+    of a commit's day falls when the commit is dated on the first day of 1970 anywhere west of UTC."""
+    return (EPOCH + dt.timedelta(seconds=t)).astimezone(zone)
+
+
 def day_start(t, zone):
     """The start of the calendar day in zone that the moment t falls on."""
-    return dt.datetime.fromtimestamp(t, zone).replace(hour=0, minute=0, second=0, microsecond=0).timestamp()
+    return moment(t, zone).replace(hour=0, minute=0, second=0, microsecond=0).timestamp()
 
 
 def first_day(t, zone):
@@ -5393,7 +5564,7 @@ def first_day(t, zone):
 
 def day_label(t, zone):
     """A moment's calendar day in zone, written the house way: 06MAR2026."""
-    d = dt.datetime.fromtimestamp(t, zone).date()
+    d = moment(t, zone).date()
     return "%02d%s%d" % (d.day, MONTHS[d.month - 1], d.year)
 
 
@@ -5401,8 +5572,8 @@ def activity(times, now, zone=dt.timezone.utc):
     """Active days, the longest streak and the current streak, over the days with a commit, as calendar
     days in zone (see local_zone). The current streak may end yesterday, since today is not over. A commit
     dated up to FUTURE_SLACK ahead counts as today, so a fast clock cannot open a gap in the streak."""
-    today = dt.datetime.fromtimestamp(now, zone).date()
-    days = sorted({min(dt.datetime.fromtimestamp(t, zone).date(), today) for t in times})
+    today = moment(now, zone).date()
+    days = sorted({min(moment(t, zone).date(), today) for t in times})
     if not days:
         return 0, 0, 0
     longest = run_len = 0
@@ -7089,7 +7260,7 @@ def figure(value, unit, provenance, term, **more):
 
 def iso_day(t, zone):
     """The calendar day holding the time t in zone, as YYYY-MM-DD."""
-    return dt.datetime.fromtimestamp(t, zone).date().isoformat()
+    return moment(t, zone).date().isoformat()
 
 
 def card_data(owner, window, now, zone, start, S, repos, private, data, stats, spark, commits, stream, column,
@@ -7137,6 +7308,9 @@ def card_data(owner, window, now, zone, start, S, repos, private, data, stats, s
             "owned_only": True, "forks": "excluded", "visibility": "public and private" if private else "public only",
             "branches": "every branch; gh-pages only when it is the default",
             "authorship": "the owner's own commits (an organization's card counts every member)",
+            # whether GitHub was asked whose each commit is: true in every file written, since a run that could not
+            # ask keeps the existing panels and this file with them (see collect's "unchecked" and main)
+            "authorship_checked": not data.get("unchecked"),
             "unverified_authors": {"addresses": authors.get("unknown", 0), "commits": authors.get("commits", 0),
                                    "definition": "#/definitions/unverified_author"}},
         "quantity": {
@@ -7372,8 +7546,11 @@ def settings():
     if pin and pin not in VARIANTS:
         raise RuntimeError("CARDS_THEME must be one of %s" % ", ".join(THEME_ORDER))
     uid = os.environ.get("CARDS_SPOTIFY_UID", "").strip()
-    if uid and not re.fullmatch(r"[A-Za-z0-9]{1,64}", uid):
-        raise RuntimeError("CARDS_SPOTIFY_UID must be letters and digits only")
+    # today's random ids, and older accounts' user names, which may hold dots, underscores and hyphens: all of them
+    # safe in a query string as they are (the relay's UID in lib/compose.js takes the same)
+    if uid and not re.fullmatch(r"[A-Za-z0-9._-]{1,64}", uid):
+        raise RuntimeError("CARDS_SPOTIFY_UID must be letters, digits, dots, underscores and hyphens only, at most "
+                           "64 characters")
     apple = os.environ.get("CARDS_APPLE_MUSIC_UID", "").strip()
     if apple and not re.fullmatch(r"[A-Za-z0-9.]{1,64}", apple):
         raise RuntimeError("CARDS_APPLE_MUSIC_UID must be letters, digits and dots only, at most 64 characters")
@@ -7409,21 +7586,69 @@ def repositories_last_time():
     return was if isinstance(was, int) and not isinstance(was, bool) else None
 
 
-def new_readme(block):
-    """README.md as bytes, with the panel's block between its markers and every other byte as it was:
-    any encoding (undecodable bytes pass through untouched), a byte order mark kept at the very start,
-    and the file's own line endings kept, the marker lines included. A README that is only an earlier
-    unmarked coderprint block is replaced; any other README gets the block on top."""
+def marker_lines(text):
+    """Where the README's own markers are: the start of each line that is a marker and nothing else (spacing
+    aside, indented at most three spaces, as Markdown allows before it reads a line as code), outside fenced
+    code, as ([starts], [ends]). A marker quoted in a sentence, a code span or a code fence is text about
+    coderprint, not the block."""
+    starts, ends, fence, pos = [], [], None, 0
+    for line in text.split("\n"):
+        opener = re.match(r" {0,3}(`{3,}|~{3,})", line)
+        if fence:
+            if opener and opener.group(1)[0] == fence[0] and len(opener.group(1)) >= len(fence) \
+                    and not line[opener.end():].strip():
+                fence = None
+        elif opener:
+            fence = opener.group(1)
+        elif re.fullmatch(r" {0,3}%s[ \t\r]*" % re.escape(README_START), line):
+            starts.append(pos)
+        elif re.fullmatch(r" {0,3}%s[ \t\r]*" % re.escape(README_END), line):
+            ends.append(pos)
+        pos += len(line) + 1
+    return starts, ends
+
+
+def new_readme(block, path=None):
+    """The profile README (path, README unless given) as bytes, with the panel's block between its markers and
+    every other byte as it was: any encoding that keeps ASCII as ASCII (undecodable bytes pass through
+    untouched), a byte order mark kept at the very start, and the file's own line endings kept, the marker lines
+    included. The markers are the ones alone on their lines outside fenced code (marker_lines). A README that is
+    only an earlier unmarked coderprint block is replaced; any other README gets the block on top. Whatever
+    would cost the owner text stops the run before any work instead: more than one pair of markers, or half a
+    pair; a README in UTF-16 or UTF-32, which a block in UTF-8 would garble; or no README of that name beside
+    one of another name (README.rst, readme.md on a case-sensitive file system), which would be left as it is
+    while a new file held the panel."""
+    path = path or README
     try:
-        with open(README, "rb") as f:
+        with open(path, "rb") as f:
             raw = f.read()
     except OSError:
         raw = b""
+        folder = os.path.dirname(path) or "."
+        try:
+            others = [n for n in os.listdir(folder) if n.lower().startswith("readme")
+                      and n != os.path.basename(path) and os.path.isfile(os.path.join(folder, n))]
+        except OSError:
+            others = []
+        if others:
+            raise RuntimeError("the profile repository's README is not named %s; rename it %s, the only file "
+                               "coderprint edits" % ((os.path.basename(path),) * 2))
+    # UTF-16 and UTF-32 (Notepad's "Unicode") hold NUL bytes wherever ASCII text stands, which no text in an
+    # encoding that keeps ASCII as ASCII does; GitHub shows such a file as binary
+    if raw.startswith((b"\xff\xfe", b"\xfe\xff", b"\x00\x00\xfe\xff")) or b"\x00" in raw:
+        raise RuntimeError("%s is not UTF-8 text (it looks like UTF-16 or UTF-32); save it as UTF-8"
+                           % os.path.basename(path))
     bom = raw.startswith(b"\xef\xbb\xbf")
     old = raw[3:].decode("utf-8", "surrogateescape") if bom else raw.decode("utf-8", "surrogateescape")
     eol = "\r\n" if "\r\n" in old else "\n"
     marked = eol.join([README_START] + block.split("\n") + [README_END])
-    a, b = old.find(README_START), old.find(README_END)
+    starts, ends = marker_lines(old)
+    if len(starts) > 1 or len(ends) > 1 or len(starts) != len(ends) or (starts and ends[0] < starts[0]):
+        raise RuntimeError("%s must hold exactly one %s line and one %s line after it, each on a line of its own, "
+                           "or neither; it holds %d and %d" % (os.path.basename(path), README_START, README_END,
+                                                               len(starts), len(ends)))
+    a = old.find(README_START, starts[0]) if starts else -1
+    b = old.find(README_END, ends[0]) if ends else -1
     lone = old.strip()
     ours = ("\n" not in lone and (lone.startswith('<a href="%s"' % LINK)
                                   or lone.startswith('<a href="%s#gh-dark-mode-only"' % LINK)
@@ -7439,13 +7664,28 @@ def new_readme(block):
 
 def write_all(files):
     """Write every file through a temporary name, and move them into place only once all are written, so
-    a failure leaves the old set whole; leftovers are removed either way. files: path to bytes."""
+    a failure leaves the old set whole; leftovers are removed either way. files: path to bytes. Each temporary
+    file is made new under a name nothing holds (mkstemp), so an existing file, folder or link of any name is
+    never written through; and nothing is written through a link or outside the profile repository (WORK)."""
+    root = os.path.realpath(WORK)
+    for path in files:
+        where = os.path.realpath(os.path.dirname(path))
+        try:
+            outside = os.path.commonpath([root, where]) != root
+        except ValueError:   # on another drive
+            outside = True
+        if os.path.islink(path) or outside:
+            raise RuntimeError("README.md or assets is a link or leads outside this repository, and coderprint "
+                               "writes only inside it")
+    mask = os.umask(0)   # the mode a file made the plain way would have, where mkstemp makes it private
+    os.umask(mask)
     temps = {}
     try:
         for path, content in files.items():
-            temps[path] = path + ".tmp"
-            with open(temps[path], "wb") as f:
+            fd, temps[path] = tempfile.mkstemp(prefix=".coderprint-", suffix=".tmp", dir=os.path.dirname(path))
+            with os.fdopen(fd, "wb") as f:
                 f.write(content)
+            os.chmod(temps[path], 0o666 & ~mask)
         for path, tmp in temps.items():
             os.replace(tmp, path)
     finally:
@@ -7469,9 +7709,12 @@ def time_limit():
     limit = os.environ.get("CARDS_TIME_LIMIT", "").strip()
     if not limit:
         return None
-    if not limit.isdigit() or not 300 <= int(limit) <= 86400:
+    # ASCII digits only, as action.yml's check and timeout take them; leading zeros aside, at most five of them,
+    # since int() refuses a value thousands of digits long with an error of its own
+    digits = limit.lstrip("0") or "0"
+    if not re.fullmatch(r"[0-9]{1,5}", digits) or not 300 <= int(digits) <= 86400:
         raise RuntimeError("CARDS_TIME_LIMIT must be a whole number of seconds from 300 to 86400")
-    return time.monotonic() + int(limit)
+    return time.monotonic() + int(digits)
 
 
 def own_card_only(owner):
@@ -7483,6 +7726,16 @@ def own_card_only(owner):
         raise RuntimeError("coderprint draws a card only for the account whose repository it runs in")
 
 
+def profile_repository(owner):
+    """The repository GitHub shows the profile README from, and where that README sits in it: owner/owner's
+    README.md for a person; for an organization, whose profile is its .github repository's profile/README.md,
+    that one, when the Action runs in .github."""
+    here = os.environ.get("GITHUB_REPOSITORY", "").partition("/")[2]
+    if here.lower() == ".github":
+        return ".github", os.path.join(WORK, "profile", "README.md")
+    return owner, README
+
+
 def main():
     global DEADLINE, AS_OF, QUANTITY, DATA_URL
     signal.signal(signal.SIGTERM, stop_on_term)   # unwinds through the clean-up below instead of dying
@@ -7490,9 +7743,14 @@ def main():
     DEADLINE = time_limit()
     owner = owner_login()
     own_card_only(owner)
+    profile, readme_path = profile_repository(owner)
+    if relay and profile != owner:   # the relay reads the data file and the panels from owner/owner only
+        raise RuntimeError("the relay does not serve an organization's card yet; leave relay unset in the "
+                           ".github repository")
     light, dark = todays_themes(pin)   # keys of THEMES: today's theme's lite and nite
     apple = bool(music) and music[0] == "apple_music"
-    DATA_URL = RAW_ASSETS.format(owner=owner) + DATA_FILE
+    raw = RAW_ASSETS.format(owner=owner, repo=profile)
+    DATA_URL = raw + DATA_FILE
     # a comment inside the markers: GitHub keeps it in the file and draws nothing for it, so a reader of the
     # README's text finds the data file and a visitor sees the same card
     pointer = "<!-- %s -->" % DATA_NOTE.format(url="assets/%s (%s)" % (DATA_FILE, DATA_URL))
@@ -7515,8 +7773,9 @@ def main():
                             music_alt="Now playing on Spotify",
                             music_dark=SPOTIFY_URL.format(uid=uid, bg=THEMES[dark]["spotify"]),
                             music_light=SPOTIFY_URL.format(uid=uid, bg=THEMES[light]["spotify"]))
-            return README_PAIR.format(link=LINK, alt=alt, **pair)
-        raw = RAW_ASSETS.format(owner=owner)
+            # relative to README.md at the root, as ever; profile/README.md, an organization's, needs the address
+            base = "" if profile == owner else raw[:-len("assets/")]
+            return README_PAIR.format(link=LINK, alt=alt, base=base, **pair)
         if relay:
             card = lambda mode, layout="": relay + "?user=" + owner + "&mode=" + mode + layout
             wide, compact = card, lambda mode: card(mode, "&layout=compact")
@@ -7528,7 +7787,7 @@ def main():
                                  compact_dark=compact("dark"), wide_light=wide("light"),
                                  compact_light=compact("light"))
 
-    new_readme(readme_block(ALT))   # read before any cloning, so a README problem fails early
+    new_readme(readme_block(ALT), readme_path)   # read before any cloning, so a README problem fails early
     repos = list_repositories(owner)
 
     data_path, legacy_path = os.path.join(OUT_DIR, DATA_FILE), os.path.join(OUT_DIR, LEGACY_DATA_FILE)
@@ -7543,14 +7802,17 @@ def main():
     # tells when in a day anyone worked. Without that, the chart's last day, drawn hours wide, and the data file
     # together placed each commit of the past week within half an hour. The window is cut once, here, at the start of
     # its first whole day in that zone, and collect cuts what is in use exactly where what is written is cut below
-    # (window_holds, with the now collect returns), so in use can never count a line written leaves out.
+    # (window_holds, with the now collect returns), so in use can never count a line written leaves out. What the
+    # profile shows is read before any cloning: the time GitHub shows there (a page read, bounded by
+    # PROFILE_TIMEOUT) and the location (a gh command). Read after a collection that used the run's time, they
+    # would take the reserve kept for drawing, or not start at all, and days would fall in UTC.
     days_back = WINDOWS[window][2]
     begun = time.time()
-    shown = profile_offset(owner)
+    shown, location = profile_offset(owner), profile_location(owner)
     offset, seen = shown if shown else (None, None)
-    zone = local_zone(offset, profile_location(owner), begun, seen)
+    zone = local_zone(offset, location, begun, seen)
     start = first_day(begun - days_back * 86400, zone) if days_back else float("-inf")
-    work = os.environ.get("CLONE_CACHE") or tempfile.mkdtemp(prefix="cards-")
+    work =os.environ.get("CLONE_CACHE") or tempfile.mkdtemp(prefix="cards-")
     os.makedirs(work, exist_ok=True)
     try:
         data = collect(owner, repos, work, start if days_back else None)
@@ -7574,6 +7836,13 @@ def main():
     if data["unread"] + len(unsure) > max(1, int(UNREAD_SHARE * readable)):
         say("That is too many to draw without, so the existing panels are kept. The next run tries again.")
         return 1
+    # drawn all the same, as README says, but never silently: a repository too big to read line by line in time is
+    # so on every run, so keeping the panels for it would keep them for good
+    blind = (data.get("code") or {}).get("unread", 0)
+    if blind:
+        say("::warning::%d of the %d repositories read could not be read line by line, so %s added lines count "
+            "whole, comments and blank lines included, and none of them as in use"
+            % (blind, readable - data["unread"] - len(unsure), "its" if blind == 1 else "their"))
     refused = (data.get("authors") or {}).get("refused", 0)
     if refused:   # a count only: an address is never printed
         say("::warning::%d %s in author-emails %s to another GitHub account, and %s commits are not counted as the "
@@ -7631,7 +7900,7 @@ def main():
     loc = data.get("code") or {}
     QUANTITY = {"written": new_lines, "production": loc.get("production", 0), "tests": loc.get("tests", 0)}
     since = day_label(now - S * 86400, zone) if (column or dated) and S >= 1 else None
-    readme = new_readme(readme_block(esc(alt_text(window, new_lines, rows))))
+    readme = new_readme(readme_block(esc(alt_text(window, new_lines, rows))), readme_path)
     panels = [("panel-light.svg", light, panel_svg), ("panel-dark.svg", dark, panel_svg),
               ("panel-compact-light.svg", light, compact_panel_svg),
               ("panel-compact-dark.svg", dark, compact_panel_svg)]
@@ -7652,11 +7921,12 @@ def main():
                      column, presentation)
 
     os.makedirs(OUT_DIR, exist_ok=True)
+    os.makedirs(os.path.dirname(readme_path), exist_ok=True)   # an organization's profile/ folder
     # coderprint writes these files (the README, the wide panels, the compact panels, the blank image when
     # the README block shows it, and coderprint.json), and deletes only its own cards.json, which
     # coderprint.json replaced. The README goes first, being the one most likely held open by an editor, and
     # the data file last, so it only ever describes panels in place.
-    files = {README: readme}
+    files = {readme_path: readme}
     files.update(drawn)
     if two:
         files[os.path.join(OUT_DIR, "blank.svg")] = BLANK_SVG
