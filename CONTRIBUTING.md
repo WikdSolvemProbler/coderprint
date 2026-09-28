@@ -19,7 +19,7 @@ A sentence or two per answer is enough. The questions exist so that the maintain
 
 ## A good challenge, worked through
 
-coderprint skips any commit that adds more than 500 new files, treating it as an existing codebase brought in rather than code written (`IMPORT_FILES` in `coderprint.py`). Suppose you think 500 is wrong. "500 is too high" is an opinion and will be closed. A pull request that challenges it well reads like this:
+coderprint skips any commit that adds more than 500 new files of code, treating it as an existing codebase brought in rather than code written (`IMPORT_FILES` in `coderprint.py`). Suppose you think 500 is wrong. "500 is too high" is an opinion and will be closed. A pull request that challenges it well reads like this:
 
 - **Who:** profile owners who scaffold projects with generators that write several hundred files in one commit.
 - **What:** those scaffolds count as written code, so the panel's new lines total is inflated.
@@ -87,12 +87,20 @@ A pull request that passes the check still needs review. The check confirms that
 The relay (`api/card.js` and `lib/compose.js`) and its tests need Node.js 22 or later and nothing else: `package.json` lists no dependencies, so there is nothing to install.
 
 ```sh
-npm test
+timeout -k 10s 300s npm test
 ```
 
 This runs `node --test` over `test/*.test.js`.
 
-The generator, `coderprint.py`, needs Python 3 and only its standard library, plus the `gh` command signed in to GitHub, and `git`. Without a time zone database (Python older than 3.9, or Windows without the `tzdata` package) it counts days in Coordinated Universal Time (UTC) or at the profile's fixed offset. Without the `design` folder it draws in a plain grey look. It reads its settings from environment variables (`CARDS_OWNER`, `CARDS_WINDOW`, `CARDS_THEME` and the others `action.yml` passes); `GH_TOKEN` is optional locally, since without it `gh`'s own sign-in answers. It writes into the folder it runs in: the panel files under `assets/`, and a block in `README.md`. Run it from a scratch copy of a profile repository, never from this one. The generator has no test suite in this repository, so for a change to it, say in your pull request exactly what you ran and what you compared.
+The generator's synthetic regression checks need Python 3.12 or later, Git, and Node.js 22 or later. They build temporary Git histories and replace GitHub responses locally; they do not need a token or access to another account. From the repository root, run:
+
+```sh
+timeout -k 10s 1800s python test/py/run.py
+```
+
+The runner gives each Python test script a five-minute deadline and exits with an error when one fails or times out. The full run has a 30-minute deadline in CI. The commands above use Linux's `timeout`; on Windows, launch them through the installed process guard with the same outer deadlines.
+
+The generator, `coderprint.py`, needs Python 3 and only its standard library, plus the `gh` command signed in to GitHub, and `git`. Without a time zone database (Python older than 3.9, or Windows without the `tzdata` package) it counts days in Coordinated Universal Time (UTC) or at the profile's fixed offset. Without the `design` folder it draws in a plain grey look. It reads its settings from environment variables (`CARDS_OWNER`, `CARDS_WINDOW`, `CARDS_THEME` and the others `action.yml` passes); `GH_TOKEN` is optional locally, since without it `gh`'s own sign-in answers. It writes into the folder it runs in: the panel files under `assets/`, and a block in `README.md`. Run a live check from a scratch copy of a profile repository, never from this one. The synthetic checks cover the generator's main paths without GitHub; for a change that needs live verification, say in your pull request exactly what you ran and what you compared. Do not imply that a second account was checked unless it was.
 
 ## Conventions
 
