@@ -343,6 +343,18 @@ describe('sanitize', () => {
     }
   });
 
+  it('refuses xml-prefixed elements while keeping xml attributes', () => {
+    for (const markup of [
+      '<xml:g/>',
+      '<xml:g xmlns:xml="http://www.w3.org/XML/1998/namespace"/>',
+      '<g><xml:g/></g>',
+    ]) {
+      assert.equal(sanitize(markup), null, markup);
+    }
+    const attributes = '<g xml:lang="en" xml:space="preserve" xml:id="card"/>';
+    assert.equal(sanitize(attributes), attributes);
+  });
+
   it('stays fast on pathological input', () => {
     const n = 200_000;
     const manyNames = Array.from({ length: n }, (_, i) => ` a${i}="c"`).join('');
