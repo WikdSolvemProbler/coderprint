@@ -464,8 +464,9 @@ x2 = commit(repo, {"a.py": body(3, "am0"), "f.py": body(20, "am").replace("line_
             [base], "feature", T0 + 60)
 git(repo, "tag", "v1", x)
 d = run(["amend"])
-check("history-F10", "an amend that changed a line, reachable from a tag, counts once: 2 commits, 23 written",
-      (len(d["commits"]), lines(d), d["left_out"].get("landed_twice")) == (2, 23, 1), summary(d))
+check("history-F10", "an amend that changed a line, reachable from a tag, counts once: 2 commits, 24 written (the "
+      "rewritten line counts again, as in_use-IU-06 says)",
+      (len(d["commits"]), lines(d), d["left_out"].get("landed_twice")) == (2, 24, 1), summary(d))
 a = new_repo("pick-a")
 a1 = commit(a, {"f.py": body(20, "pk")}, (), "base", T0)
 commit(a, {"f.py": body(20, "pk") + "fix = 1\n"}, [a1], "the fix", T0 + 500)
