@@ -30,6 +30,12 @@ inputs:
   mark:
     description: Your watermark as SVG path data with straight segments only (M, L, H, V, Z), filled even-odd, up to 48 KB. Pass it from a secret (a repository secret named CODERPRINT_MARK, for example) so the path data never sits in your repository. It is drawn into the panel as pixels merged with the background; like any picture, what is drawn can still be seen and traced. Optional.
     default: ""
+  author-emails:
+    description: Email addresses you commit from that are not linked to your GitHub account, separated by commas, so their commits count as yours. Optional; addresses linked to your account, and your noreply addresses, are recognized already.
+    default: ""
+  time-limit:
+    description: Seconds the drawing step may run, 300 to 86400. Keep it under the job's timeout-minutes; a repository that cannot be read in time is left out and counted.
+    default: "1100"
   force:
     description: Redraw even if fewer repositories are visible than last time (a deleted repository, or a token that lost access).
     default: "false"
@@ -51,15 +57,20 @@ runs:
         CARDS_APPLE_MUSIC_UID: ${{ inputs.apple-music-uid }}
         CARDS_RELAY: ${{ inputs.relay }}
         CARDS_MARK_DATA: ${{ inputs.mark }}
+        CARDS_AUTHOR_EMAILS: ${{ inputs.author-emails }}
+        CARDS_TIME_LIMIT: ${{ inputs.time-limit }}
         FORCE: ${{ inputs.force == 'true' && '1' || '' }}
         COMMIT: ${{ inputs.commit }}
       run: |
+        case "$CARDS_TIME_LIMIT" in
+          ''|*[!0-9]*) echo "::error::time-limit must be a whole number of seconds"; exit 1 ;;
+        esac
         if [ "$COMMIT" = true ]; then
           branch=$(git symbolic-ref -q --short HEAD) || { echo "::error::coderprint must run on a branch, not a tag"; exit 1; }
           # draw on the newest commit, so anything pushed since the run was queued is drawn around
           timeout 60 git pull -q --ff-only origin "$branch"
         fi
-        timeout -k 30 1100 python3 "$GITHUB_ACTION_PATH/coderprint.py"
+        timeout -k 30 "$CARDS_TIME_LIMIT" python3 "$GITHUB_ACTION_PATH/coderprint.py"
 
     - name: Commit the panel if it changed
       if: ${{ inputs.commit == 'true' }}
