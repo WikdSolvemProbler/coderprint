@@ -123,6 +123,16 @@ export function cardsJson({ palette = PALETTE, uid = '1joahg6umn39flaqsl1c3j9n3'
   return JSON.stringify({ generated: '2026-09-26T07:38Z', commits: 1920, palette, spotify: { uid }, ...rest });
 }
 
+// coderprint.json as the generator writes it: the figures, and what the relay reads under presentation.
+export function coderprintJson({ palette = PALETTE, uid = '1joahg6umn39flaqsl1c3j9n3', ...rest } = {}) {
+  return JSON.stringify({
+    schema: 'coderprint/1',
+    as_of: '2026-09-27',
+    quantity: { in_use_loc: { value: 410216, unit: 'lines of code', provenance: 'measured' } },
+    presentation: { theme: 'sage', palette, spotify: { uid }, ...rest },
+  });
+}
+
 // cards.json as the generator writes it for Apple Music: the uid under apple_music, and no Spotify.
 export function appleCardsJson({ palette = PALETTE, uid = APPLE_UID } = {}) {
   return JSON.stringify({ generated: '2026-09-26T07:38Z', commits: 1920, palette, apple_music: { uid } });

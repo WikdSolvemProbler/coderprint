@@ -36,7 +36,7 @@ Answer the five Ws that [CONTRIBUTING.md](CONTRIBUTING.md) asks of every contrib
 - **When**: the commit or release tag you tested, and whether you ran the Action, the relay, or both.
 - **Who** can exploit it, and who is harmed: the user who installed coderprint, a visitor to their profile, or someone else.
 - **Why** it matters: what an attacker gains, such as a leaked token, a leaked private repository name, script running in a viewer, or the relay fetching a host it should not.
-- **How** to reproduce it, with the smallest proof you can make: a crafted Scalable Vector Graphics (SVG) file, a `cards.json`, a request address, or a workflow input. If you have a fix in mind, say how you would make it.
+- **How** to reproduce it, with the smallest proof you can make: a crafted Scalable Vector Graphics (SVG) file, a `coderprint.json`, a request address, or a workflow input. If you have a fix in mind, say how you would make it.
 
 ## What happens next
 
@@ -57,7 +57,7 @@ A vulnerability is a way to break one of these promises. Each is kept in the cod
 
 **The Action**
 
-- It never prints or writes a repository name, a file path, a commit message or an email address. Action logs on a public repository are public, so a leak of any of these, above all the name of a private repository, is a vulnerability. The panels and `assets/cards.json` hold totals only, and only by whole days, so they never tell what time of day anyone worked. A failed command reports only the program's name, never its arguments (`run` in `coderprint.py`).
+- It never prints or writes a repository name, a file path, a commit message or an email address. Action logs on a public repository are public, so a leak of any of these, above all the name of a private repository, is a vulnerability. The panels and `assets/coderprint.json` hold totals only, and only by whole days, so they never tell what time of day anyone worked; `coderprint.json` is public output built from the same totals the panels draw, and names no repository. A failed command reports only the program's name, never its arguments (`run` in `coderprint.py`).
 - The token never appears on a command line. `git` receives it through an environment-only header (`git_auth`), and the README's setup gives it a GitHub App token limited to reading contents and metadata that expires within the hour.
 - Every Action input reaches the script through an environment variable, never pasted into the shell script, so an input cannot run commands (`action.yml`).
 - Each clone is deleted as soon as it has been read, and the temporary folder when the run ends, including when the time limit stops it, unless the `CLONE_CACHE` setting for local runs keeps them.
@@ -69,8 +69,8 @@ A vulnerability is a way to break one of these promises. Each is kept in the cod
 **The relay**
 
 - It serves only the logins listed in `CODERPRINT_USERS`, and serves no one when that setting is empty or missing (`isAllowed`). A login must be a valid GitHub login, and each parameter may appear once.
-- It fetches only three fixed hosts: `raw.githubusercontent.com` for the user's own profile repository, `spotify-github-profile.kittinanx.com` and `music-profile.rayriffy.com`. It refuses every redirect, stops every fetch at a deadline, and stops reading a body at 2 mebibytes for an image and 256 kibibytes for `cards.json`, so an upstream cannot exhaust its memory or time.
-- It treats everything it fetches as hostile. `cards.json` is read as JavaScript Object Notation (JSON), and only valid colors and identifiers are taken from it (`readCards`). The panel and the Spotify card pass the sanitizer in `lib/compose.js` before any of their markup is served; from the Apple Music card the relay reads only the song, the artist and the cover, and draws its own markup.
+- It fetches only three fixed hosts: `raw.githubusercontent.com` for the user's own profile repository, `spotify-github-profile.kittinanx.com` and `music-profile.rayriffy.com`. It refuses every redirect, stops every fetch at a deadline, and stops reading a body at 2 mebibytes for an image and 256 kibibytes for `coderprint.json` or `cards.json`, so an upstream cannot exhaust its memory or time.
+- It treats everything it fetches as hostile. `coderprint.json`, or for a profile drawn before it existed `cards.json`, is read as JavaScript Object Notation (JSON), and only valid colors and identifiers are taken from it (`readCards`). The panel and the Spotify card pass the sanitizer in `lib/compose.js` before any of their markup is served; from the Apple Music card the relay reads only the song, the artist and the cover, and draws its own markup.
 - The sanitizer refuses any document that is not well-formed Extensible Markup Language (XML), or that nests too deep. It drops `script`, `iframe`, `frame`, `frameset`, `object`, `embed` and `meta` elements, every event handler attribute, `xml:base`, and `srcset`, `imagesrcset`, `ping` and `attributionsrc`. It keeps a link or source only when it points inside the document or at an embedded raster image in Portable Network Graphics (PNG), Joint Photographic Experts Group (JPEG), Graphics Interchange Format (GIF) or WebP format. It refuses a style block, and drops an attribute, holding Cascading Style Sheets (CSS) that imports, binds, or fetches anything outside the document, and an animation may not target a link or an event handler.
 - Every card goes out with a Content Security Policy (CSP) of `default-src 'none'; img-src data:; style-src 'unsafe-inline'; sandbox` and `X-Content-Type-Options: nosniff`, so a card opened directly is inert even if something slipped past the sanitizer.
 - It serves the card at `/api/card` and nothing else of the deployed copy but `robots.txt`.
