@@ -18,8 +18,10 @@ repository name, a file path, commit text or an email address, and names none of
 panels and assets/coderprint.json hold aggregates only.
 
 What counts as a line of code: a line of a programming or markup language's file that is neither blank nor a
-comment (see NOT_CODE and COMMENTS). Prose (Markdown, TeX), data (YAML, TOML) and files no language claims are
-not code. Written: the lines of code added in a file version, read from its commit's diff and counted once, the
+comment (see NOT_CODE and SYNTAXES), each file read whole as its language reads it: Python by its own tokenizer,
+most others with their literals followed (see read_lines). Prose (Markdown, TeX, a literate source's prose), data
+(YAML, TOML), notebooks and files no language claims are not code. Written: the lines of code added in a file
+version, read from its commit's diff as the whole version reads them (see read_added_code) and counted once, the
 first time its exact content appears in any repository or branch; a commit that only reformats many files at
 once (see sweep) adds nothing for them. In use: the lines of code on each default branch today whose text the
 owner added, split into production and test code by where they live (see is_test). Copies, moves, merges, branch landings and
@@ -28,12 +30,14 @@ commits count (see authorship); others', automation's, and a second landing of o
 commit that adds more than IMPORT_FILES brand-new files of counted code is treated as bringing in an
 existing codebase, not writing one: it is a commit, but adds no lines. File versions from another account's
 template, or from coderprint itself in a relay copy, count as already written. Vendored folders, generated
-output, lockfiles, submodules and data files never count, nor does a gh-pages branch that is not the
-default. Every time is moved to the start of its day before anything is drawn or written. A
-file's language is read from its name or extension alone, named as GitHub's Linguist names it (the
-legends shorten the few names too long for them: Visual Basic .NET is vb.net there). An extension
-several languages share counts as Other (.h, .m, .pl, .v), unless one of them writes far more of it
-than the rest (.pm counts as Perl, .gd as GDScript).
+output (by folder, by name, or by a generator's mark in a file's first lines), lockfiles, submodules, symbolic
+links and data files never count, nor do the paths a repository's .gitattributes marks linguist-vendored,
+linguist-generated or linguist-documentation, nor a gh-pages branch that is not the default. Every time is moved
+to the start of its day before anything is drawn or written. A file's language is read from its name or
+extension alone, named as GitHub's Linguist names it (the legends shorten the few names too long for them:
+Visual Basic .NET is vb.net there). An extension several languages share counts as Other (.h, .m, .pl, .v),
+unless one of them writes far more of it than the rest (.pm counts as Perl, .gd as GDScript); Other holds code
+only where every sharer comments compatibly (.h, .m, .fs, .v; see SHARED_CODE).
 Known limits: a merge's own conflict resolution is not counted, a line rewritten counts again, and a squash
 merge whose branch was deleted collapses its days into one.
 
@@ -118,6 +122,7 @@ click goes to where the widget is installed.
 import base64
 import bisect
 import datetime as dt
+import difflib
 import gzip
 import hashlib
 import http.client
@@ -134,6 +139,7 @@ import sys
 import tempfile
 import threading
 import time
+import tokenize
 import unicodedata
 import urllib.parse
 import urllib.request
@@ -188,12 +194,26 @@ LINK = os.environ.get("CARDS_LINK") or "https://github.com/WikdSolvemProbler/cod
 # go-vendor, lib_vendored), while one that only starts with it is the owner's own (src/vendor_portal).
 VENDOR_ENDS = tuple(sep + word for sep in "_-" for word in ("vendor", "vendors", "vendored")) + ("_target",)
 EXCLUDED_DIRS = {   # whole folder names
-    "node_modules", "vendor", "vendors", "vendored", "_vendor", "third_party", "thirdparty", "dist", "build", "out", "target", "coverage",
+    "node_modules", "vendor", "vendors", "vendored", "_vendor", "third_party", "thirdparty", "target",
     ".next", "__pycache__", ".venv", "venv", "site-packages", ".goldens", ".fixtures", ".dart_tool", ".idea", ".lake",
     ".mvn", ".nuxt", ".stack-work", ".svelte-kit", ".terraform", ".yarn", "3rd-party", "3rd_party", "3rdparty",
     "__generated__", "_build", "_esy", "_opam", "_site", "bower_components", "carthage", "deriveddata", "dist-newstyle",
     "elm-stuff", "flow-typed", "godeps", "htmlcov", "lake-packages", "pods", "testdata", "third-party",
+    "jspm_packages", "web_modules",
 }
+# Folders a build writes its output to. At the top of a repository or of a module (build/, app/build/, dist/) nothing
+# in them counts: CMake's, Gradle's and Android's builds write C, C++ and Java there (R.java, CMakeCCompilerId.c), and
+# setuptools copies Python there. Below a folder of source (SOURCE_DIRS) the same names are packages of the owner's
+# own code (Go's internal/build and cmd/dist, a Java package named coverage under src/main/java, src/out), so there
+# only web output (HTML, CSS, JavaScript and TypeScript declarations) is left out. Source kept in a top-level build/
+# or coverage/ folder (as coverage.py keeps its own) is left out with the output: the conservative reading.
+OUTPUT_DIRS = {"dist", "build", "out", "coverage"}
+SOURCE_DIRS = {"src", "source", "sources", "lib", "pkg", "internal", "cmd", "packages", "scripts", "tools"}
+# Vendor folders by convention only at a repository's root (C and C++ projects' extern/ and external/, Elixir's and
+# C projects' deps/), where the same names deeper down are usually the owner's own modules (src/external/api.ts)
+ROOT_VENDOR_DIRS = {"extern", "external", "deps"}
+# and at any depth, a pair of folders: WordPress's installed plugins, Unity's third-party plugins
+VENDOR_PAIRS = {("wp-content", "plugins"), ("assets", "plugins")}
 EXCLUDED_EXTS = {
     ".json", ".jsonl", ".lock", ".golden", ".csv", ".tsv", ".log", ".txt", ".aux", ".toc", ".out", ".bbl", ".blg",
     ".synctex", ".gz", ".map", ".snap", ".db", ".sqlite", ".svg", ".ipynb", ".pdf", ".xml", ".csproj", ".diff",
@@ -201,6 +221,8 @@ EXCLUDED_EXTS = {
     ".patch", ".pbxproj", ".plist", ".po", ".pot", ".proj", ".props", ".resx", ".rktd", ".sagews", ".sarif", ".sln",
     ".stl", ".storyboard", ".tab", ".targets", ".vbproj", ".vcxproj", ".webmanifest", ".xcuserstate",
     ".xcworkspacedata", ".xib", ".xlf", ".xliff",
+    # notebooks, which hold their output cells beside their input, as .ipynb does: Mathematica's and its CDF
+    ".nb", ".nbp", ".cdf",
     # what the Unity and Godot editors write: scenes, prefabs, assets, import settings and resources
     ".meta", ".unity", ".prefab", ".mat", ".anim", ".controller", ".overridecontroller", ".asset", ".physicmaterial",
     ".mask", ".mixer", ".playable", ".spriteatlas", ".terrainlayer", ".lighting", ".shadergraph", ".shadersubgraph",
@@ -259,8 +281,7 @@ LANGUAGES = {
     ".rabl": "Ruby", ".rake": "Ruby", ".rbi": "Ruby", ".rbuild": "Ruby", ".rbw": "Ruby", ".rbx": "Ruby", ".ru": "Ruby",
     ".ruby": "Ruby", ".thor": "Ruby", ".watchr": "Ruby", ".lua": "Lua", ".nse": "Lua", ".pd_lua": "Lua", ".rbxs": "Lua",
     ".rockspec": "Lua", ".wlua": "Lua", ".luau": "Luau", ".jl": "Julia", ".wl": "Wolfram", ".wls": "Wolfram",
-    ".wlt": "Wolfram", ".nb": "Wolfram", ".nbp": "Wolfram", ".mt": "Wolfram", ".mathematica": "Wolfram",
-    ".cdf": "Wolfram", ".hs": "Haskell", ".hs-boot": "Haskell", ".hsc": "Haskell", ".lhs": "Haskell", ".ml": "OCaml",
+    ".wlt": "Wolfram", ".mt": "Wolfram", ".mathematica": "Wolfram", ".hs": "Haskell", ".hs-boot": "Haskell", ".hsc": "Haskell", ".lhs": "Haskell", ".ml": "OCaml",
     ".mli": "OCaml", ".mll": "OCaml", ".mly": "OCaml", ".eliom": "OCaml", ".eliomi": "OCaml", ".ml4": "OCaml",
     ".sml": "Standard ML", ".sig": "Standard ML", ".fun": "Standard ML", ".bat": "Batchfile", ".cmd": "Batchfile",
     ".cs": "C#", ".csx": "C#", ".cake": "C#", ".linq": "C#", ".fsi": "F#", ".fsx": "F#", ".vb": "Visual Basic .NET",
@@ -362,6 +383,8 @@ NAMES = {
     ".emacs": "Emacs Lisp", "_emacs": "Emacs Lisp", ".spacemacs": "Emacs Lisp", ".gnus": "Emacs Lisp",
     ".viper": "Emacs Lisp", "cask": "Emacs Lisp", "eask": "Emacs Lisp",
 }
+# Whole file names matched as written, whose lowercase would claim a build script of anyone's (a file named build)
+CASED_NAMES = {"BUILD": "Starlark", "WORKSPACE": "Starlark"}   # Bazel's, as Linguist names them
 OTHER = "Other"
 PROSE = {"Markdown"}  # not a programming language, so it is left out of the languages-written count
 
@@ -681,21 +704,38 @@ def language_of(path):
     """The language a path counts toward, or None when it is excluded. A whole file name (Dockerfile,
     CMakeLists.txt, .bashrc) is tried first, so it wins over an excluded extension; then a two-part suffix
     (.blade.php), then the extension. A file with neither, or an extension no language claims alone, is
-    Other."""
+    Other. Vendored folders (EXCLUDED_DIRS, ROOT_VENDOR_DIRS, VENDOR_PAIRS) and a build's output (OUTPUT_DIRS) are
+    left out."""
     parts = path.replace("\\", "/").split("/")
-    for seg in parts[:-1]:
-        s = seg.lower()
+    folders = [seg.lower() for seg in parts[:-1]]
+    output = source = False
+    for s in folders:
         if s in EXCLUDED_DIRS or s.endswith(VENDOR_ENDS):
             return None
+        if s in OUTPUT_DIRS:
+            if not source:   # a build's output folder (see OUTPUT_DIRS)
+                return None
+            output = True
+        source = source or s in SOURCE_DIRS
+    if folders and folders[0] in ROOT_VENDOR_DIRS or any(pair in VENDOR_PAIRS for pair in zip(folders, folders[1:])):
+        return None
+    if parts[-1] in CASED_NAMES:
+        return CASED_NAMES[parts[-1]]
     name = parts[-1].lower()
     if name in EXCLUDED_NAMES or name.endswith(EXCLUDED_SUFFIXES) or name.startswith(EXCLUDED_PREFIXES):
         return None
     if name in NAMES:
         return NAMES[name]
     stem, ext = os.path.splitext(name)
+    if (name.startswith(("dockerfile.", "containerfile.")) and ext not in LANGUAGES and ext not in EXCLUDED_EXTS
+            and ext != ".dockerignore"):
+        return "Dockerfile"   # Dockerfile.dev, Dockerfile.prod: one Dockerfile per build, but not its ignore list
     if ext in EXCLUDED_EXTS:
         return None
-    return SUFFIXES.get(os.path.splitext(stem)[1] + ext) or LANGUAGES.get(ext, OTHER)
+    lang = SUFFIXES.get(os.path.splitext(stem)[1] + ext) or LANGUAGES.get(ext, OTHER)
+    if output and (lang in ("HTML", "CSS", "JavaScript") or name.endswith((".d.ts", ".d.mts", ".d.cts"))):
+        return None
+    return lang
 
 
 def automated(name, email, committer, committer_email):
@@ -709,8 +749,9 @@ def automated(name, email, committer, committer_email):
 
 def read_commits(repo_dir, index, renames=True):
     """Every non-merge commit on every branch but gh-pages, with its author's name and address, its subject
-    and each file's new blob and lines added and deleted. Submodules are left out. Records are split on NUL,
-    which no git author name, subject or unquoted path can contain; the subject is never printed or written."""
+    and each file's new blob and lines added and deleted. Submodules and symbolic links (LINKS) are left out. Records
+    are split on NUL, which no git author name, subject or unquoted path can contain; the subject is never printed
+    or written."""
     if not run(["git", "-C", repo_dir, "for-each-ref", "--count=1", "refs/heads"]).strip():
         return [], 0  # an empty repository has nothing to read
     out = run(["git", "-C", repo_dir, "-c", "core.quotepath=off", "log", "--exclude=refs/heads/gh-pages", "--all",
@@ -738,7 +779,7 @@ def read_commits(repo_dir, index, renames=True):
             mismatched += 1
             continue
         files = [Change(blob, status, path, added, deleted)
-                 for (blob, status, path, mode), (added, deleted) in zip(raw, num) if mode != "160000"]
+                 for (blob, status, path, mode), (added, deleted) in zip(raw, num) if mode not in LINKS]
         commits.append(Commit(int(ts), index, sha, automated(author, email, committer, committer_email),
                               email.strip().lower(), author.strip(), subject, files))
     return commits, mismatched
@@ -912,40 +953,1172 @@ def slot(work, owner, name):
 # A line of code is a line of a file in a programming or markup language that is neither blank nor a comment.
 # Prose (Markdown, TeX), data (YAML, TOML) and files no language claims are never code.
 NOT_CODE = {"Markdown", "TeX", "YAML", "TOML", OTHER}
-# How each language comments: the prefixes that start a line comment, and the pairs that open and close a block.
-# A language missing here has every line that is not blank read as code.
-C_COMMENTS = (("//",), (("/*", "*/"),))
-HASH_COMMENTS = (("#",), ())
-COMMENTS = {
-    **{lang: C_COMMENTS for lang in (
-        "C", "C++", "C#", "Java", "JavaScript", "TypeScript", "Go", "Rust", "Swift", "Kotlin", "Scala", "Dart",
-        "Groovy", "Gradle", "Objective-C++", "Zig", "Solidity", "Cuda", "GLSL", "HLSL", "WGSL", "Vala", "Haxe", "Apex",
-        "D", "Protocol Buffer", "Thrift", "Jsonnet", "CUE", "Odin", "Carbon", "Metal", "Vue", "Svelte", "Astro", "Move",
-        "Cairo", "Bicep", "Pkl", "QML", "Gleam", "Verilog", "SystemVerilog", "ReScript", "Reason", "ShaderLab",
-        "Processing", "AIDL", "GraphQL", "Stan", "Nextflow", "ANTLR", "Yacc", "Lex", "Blade", "Twig")},
-    **{lang: HASH_COMMENTS for lang in (
-        "Shell", "Nushell", "Perl", "R", "Makefile", "Dockerfile", "CMake", "Nim", "Crystal", "Elixir", "Tcl", "Awk",
-        "Starlark", "GDScript", "Just", "Raku", "Janet", "Meson", "Procfile", "Gnuplot", "Stata", "SAS", "Sage", "GAP",
-        "Earthly", "jq", "sed", "M4", "Vyper", "Hy", "Mojo")},
-    **{"PHP": (("//", "#"), (("/*", "*/"),)), "CSS": ((), (("/*", "*/"),)), "HCL": (("#", "//"), (("/*", "*/"),)),
-       "Nix": (("#",), (("/*", "*/"),)), "Python": (("#",), (('"""', '"""'), ("'''", "'''"))),
-       "Cython": (("#",), (('"""', '"""'), ("'''", "'''"))), "Ruby": (("#",), (("=begin", "=end"),)),
-       "PowerShell": (("#",), (("<#", "#>"),)), "Julia": (("#",), (("#=", "=#"),)),
-       "CoffeeScript": (("#",), (("###", "###"),)), "Lua": (("--",), (("--[[", "]]"),)),
-       "Luau": (("--",), (("--[[", "]]"),)), "Haskell": (("--",), (("{-", "-}"),)), "Elm": (("--",), (("{-", "-}"),)),
-       "PureScript": (("--",), (("{-", "-}"),)), "Agda": (("--",), (("{-", "-}"),)),
-       "Idris": (("--",), (("{-", "-}"),)), "SQL": (("--",), (("/*", "*/"),)), "Lean": (("--",), (("/-", "-/"),)),
-       "Ada": (("--",), ()), "VHDL": (("--",), ()), "AppleScript": (("--",), (("(*", "*)"),)),
-       "OCaml": ((), (("(*", "*)"),)), "Standard ML": ((), (("(*", "*)"),)), "F#": (("//",), (("(*", "*)"),)),
-       "F*": (("//",), (("(*", "*)"),)), "Rocq Prover": ((), (("(*", "*)"),)), "Isabelle": ((), (("(*", "*)"),)),
-       "Wolfram": ((), (("(*", "*)"),)), "Pascal": (("//",), (("{", "}"), ("(*", "*)"))),
-       "MATLAB": (("%",), (("%{", "%}"),)), "Erlang": (("%",), ()), "Prolog": (("%",), (("/*", "*/"),)),
-       "Common Lisp": ((";",), (("#|", "|#"),)), "Clojure": ((";",), ()), "Scheme": ((";",), (("#|", "|#"),)),
-       "Racket": ((";",), (("#|", "|#"),)), "Emacs Lisp": ((";",), ()), "Fennel": ((";",), ()),
-       "Assembly": ((";", "#"), ()), "Batchfile": (("rem ", "::", "@rem "), ()), "VBScript": (("'", "rem "), ()),
-       "Visual Basic .NET": (("'",), ()), "Fortran": (("!",), ()), "HTML": ((), (("<!--", "-->"),)),
-       "XSLT": ((), (("<!--", "-->"),)), "Vim script": (('"',), ()), "Scilab": (("//",), ()),
-       "Asymptote": (("//",), (("/*", "*/"),)), "Typst": (("//",), (("/*", "*/"),))}}
+BLANK, COMMENT, CODE = 0, 1, 2   # how a line reads, one byte a line
+KINDS = ("blank", "comment", "code")
+UNREAD = "unread"   # the state at a boundary no reading can start from: inside a Python statement (see PythonReader)
+# A block comment: its opening as a regular expression; its closing, a plain string that may name the opening's
+# group as {0} (Lua's --[==[ closes at ]==]), or a regular expression for the modes that need one; whether it nests;
+# where it closes (mode: any, anywhere after its opening; re, at the first match of a regular expression; col0, at
+# a line starting with its closing, as Ruby's =end, and then it opens only in column 1 too; alone, on a line holding
+# nothing else, as MATLAB's %}, and it opens only alone as well); and whether the rest of the closing line is
+# comment too (Ruby's =end, Perl's =cut).
+Block = namedtuple("Block", "open close nests mode rest")
+# A literal, whose inside is never a comment and whose lines are code: esc ends at its closing unless its escape
+# comes before it, dbl at a closing not doubled (Pascal's 'it''s'), both at a closing neither doubled nor escaped
+# (SQL's), raw at its closing whatever comes before it (or at a regular expression's match, with esc "re"); esc1,
+# dbl1, both1 and raw1 end with their line as well, unless an escape carries one on (C's backslash before a
+# newline), and the others run on across lines. A skip is code read in one piece (a character literal); eol runs
+# to the end of its line (Zig's \\ lines); here is a heredoc, whose body starts on the next line and ends at a line
+# starting with its name (PHP's <<<EOT), which the opening's group holds.
+Literal = namedtuple("Literal", "kind open close esc")
+E = re.escape   # a plain string as a regular expression
+
+
+def lit(kind, opening, closing="", esc="\\"):
+    return Literal(kind, opening, closing, esc)
+
+
+def blk(opening, closing, nests=False, mode="any", rest=False):
+    """A block comment whose opening is a plain string (see Block)."""
+    return Block(E(opening), closing, nests, mode, rest)
+
+
+class Syntax:
+    """How one language writes comments and literals, as its line reader (Lines) reads them: line comments that may
+    follow code (line, regular expressions), comments only at a line's start (start), block comments that may follow
+    code (blocks) or open only at a line's start (start_blocks), the literals whose insides are never comments
+    (literals), lines that start like a comment but are code (code_first: PHP's #[ attributes, the C preprocessor in
+    assembly), and characters that make a line a comment in a given column (column: fixed-form Fortran's C in column
+    1, COBOL's * in column 7). A tracked language is read whole, literal by literal, so a block comment opened after
+    code is seen (int x; /* ...) and a literal's lines are code whatever they hold. An untracked one, whose literals
+    cannot be told apart line by line with certainty (Perl's and Ruby's heredocs and regular expressions, MATLAB's
+    transpose, a shell's quoting), is read only at the start of each line and after a comment that closes on it:
+    the conservative approximation, which counts as code a comment it cannot see there."""
+
+    def __init__(self, line=(), start=(), blocks=(), start_blocks=(), literals=(), code_first=(), column=(),
+                 tracked=True, exits=None):
+        self.tracked, self.column = tracked, column
+        self.blocks = list(start_blocks) + list(blocks)
+        self.start_count = len(start_blocks)
+        self.literals = list(literals) if tracked else []
+        parts = ["(?P<B%d>%s)" % (k, b.open) for k, b in enumerate(self.blocks) if k >= self.start_count]
+        parts += ["(?P<S%d>%s)" % (k, f.open) for k, f in enumerate(self.literals)]
+        if exits:
+            parts.append("(?P<X>%s)" % exits)
+        if line:
+            parts.append("(?P<L>%s)" % "|".join(line))
+        self.code_re = re.compile("|".join(parts)) if parts else None
+        self.exit_re = re.compile(exits) if exits else None
+        self.start_re = re.compile("(?i)(?:%s)" % "|".join(start)) if start else None
+        self.first_re = re.compile("(?:%s)" % "|".join(code_first)) if code_first else None
+        self.open_res = [re.compile(b.open) for b in self.blocks]
+        self.close_res = [re.compile(b.close) if b.mode != "any" else None for b in self.blocks]
+        self.inside_res = {}
+
+
+def closing(form, group):
+    """A block's or literal's closing, filled in from its opening's group (Lua's ]==], C++'s )delim")."""
+    return form.close.replace("{0}", group or "") if "{0}" in form.close else form.close
+
+
+def inner(m):
+    """The first group inside the alternative the master pattern matched (see Syntax), or None."""
+    k = m.lastindex
+    if k is None or k + 1 > m.re.groups or m.start(k + 1) < 0 or m.start(k + 1) > m.end(k):
+        return None
+    return m.group(k + 1)
+
+
+def never(k, state):
+    return False
+
+
+class LineReader:
+    """A reader that reads a file line by line, each line's reading depending only on the line and the state the
+    line before it left: None in plain code, or a tuple naming what is open. Every boundary between two lines can
+    start a reading, so two readings of a file agree on every line after a boundary where their states agree.
+    initial is the state at a file's start; middle the one assumed where a reading must start part way through a
+    file with nothing known of what is open there (see LineKinds)."""
+    initial = middle = None
+    exact = True
+    fallback = None
+
+    def read(self, line, state):
+        raise NotImplementedError
+
+    def session(self, get, n, eol, b, state, stop):
+        """Reads lines b, b + 1 and on (get(i) gives line i as text) from state, until stop(k, state) says so at a
+        boundary k: (kinds of lines b to k - 1, states at boundaries b + 1 to k, k)."""
+        kinds, states, read = [], [], self.read
+        k = b
+        while k < n:
+            kind, state = read(get(k), state)
+            kinds.append(kind)
+            states.append(state)
+            k += 1
+            if stop(k, state):
+                break
+        return kinds, states, k
+
+
+class Lines(LineReader):
+    """The line reader for a language's Syntax."""
+
+    def __init__(self, syntax):
+        self.syntax = syntax
+
+    def read(self, line, state, bare=None):
+        """How line reads, given the state the line before left: (kind, the state it leaves). bare, a list, gets the
+        line's code with its literals and comments taken out."""
+        s = line[1:] if line[:1] == "\ufeff" else line   # a byte order mark before a file's first line
+        if not s.strip():
+            return BLANK, state
+        code, pos = False, 0
+        if state is None:
+            start = self.start(s, bare)
+            if start is None:
+                return COMMENT, None
+            code, state, pos = start
+        code, state, _ = self.scan(s, pos, state, code, bare)
+        return (CODE if code else COMMENT), state
+
+    def start(self, s, bare=None):
+        """The start of a line in plain code: None when that alone makes it a comment, else (whether it read code,
+        the state, where to read on)."""
+        syn, n = self.syntax, len(s)
+        for col, chars in syn.column:
+            if len(s) > col and s[col] in chars:
+                return None
+        pos = n - len(s.lstrip())
+        m = syn.first_re.match(s, pos) if syn.first_re else None
+        if m:
+            if bare is not None:
+                bare.append(m.group())
+            return True, None, m.end()
+        for k in range(syn.start_count):
+            b = syn.blocks[k]
+            m = syn.open_res[k].match(s, pos)
+            if m and (b.mode != "col0" or pos == 0) and (b.mode != "alone" or not s[m.end():].strip()):
+                return False, ("b", k, 1, closing(b, m.group(1) if m.re.groups else None), False), m.end()
+        if syn.start_re and syn.start_re.match(s, pos) and not (syn.code_re and syn.code_re.match(s, pos)):
+            return None
+        return False, None, pos
+
+    def scan(self, s, pos, state, code, bare):
+        """Reads s from pos on in state: (whether it held code, the state at its end, where the reading stopped, which
+        is the end unless an exit stopped it, as PHP's ?> does)."""
+        syn, n = self.syntax, len(s)
+        while True:
+            if state is None:
+                if pos >= n or not syn.code_re:
+                    if s[pos:].strip():
+                        code = True
+                        if bare is not None:
+                            bare.append(s[pos:])
+                    return code, None, n
+                if syn.tracked:
+                    m = syn.code_re.search(s, pos)
+                elif code:   # untracked: nothing after code is read
+                    return code, None, n
+                else:
+                    m = syn.code_re.match(s, n - len(s[pos:].lstrip()))
+                end = m.start() if m else n
+                if s[pos:end].strip():
+                    code = True
+                    if bare is not None:
+                        bare.append(s[pos:end])
+                if not m:
+                    return code, None, n
+                group = m.lastgroup
+                if group == "L":
+                    if syn.exit_re:   # PHP: a line comment ends where PHP does
+                        x = syn.exit_re.search(s, m.end())
+                        if x:
+                            return code, None, x.start()
+                    return code, None, n
+                if group == "X":
+                    return code, None, m.start()
+                k = int(group[1:])
+                if group[0] == "B":
+                    state, pos = ("b", k, 1, closing(syn.blocks[k], inner(m)), False), m.end()
+                    continue
+                f = syn.literals[k]
+                code = True
+                if bare is not None:
+                    bare.append(" ")
+                if f.kind == "skip":
+                    pos = m.end()
+                elif f.kind == "eol":
+                    return code, None, n
+                elif f.kind == "here":
+                    return code, ("h", inner(m) or ""), n
+                else:
+                    state, pos = ("s", k, closing(f, inner(m))), m.end()
+            elif state[0] == "b":
+                end = self.inside(s, pos, state)
+                if isinstance(end, tuple):
+                    return code, end, n
+                rest = syn.blocks[state[1]].rest
+                state, pos = None, end
+                if rest:
+                    return code, None, n
+            elif state[0] == "s":
+                f = syn.literals[state[1]]
+                end = self.literal_end(s, pos, f, state[2])
+                if end < 0:
+                    if s[pos:].strip():
+                        code = True
+                    if f.kind[-1] == "1":
+                        # a literal of one line ends with it, unless an escape carries it on (C's backslash)
+                        tail = s.rstrip("\r")
+                        run = len(tail) - len(tail.rstrip(f.esc)) if f.kind in ("esc1", "both1") and f.esc else 0
+                        state = state if run % 2 else None
+                    return code, state, n
+                code, state, pos = True, None, end
+            else:   # ("h", name): a heredoc's body, which a line starting with its name ends
+                t = s.lstrip()
+                name, code = state[1], True
+                after = t[len(name):len(name) + 1]
+                if name and t.startswith(name) and not (after.isalnum() or after == "_"):
+                    state, pos = None, n - len(t) + len(name)
+                    continue
+                return code, state, n
+
+    def inside(self, s, pos, state):
+        """Where the block comment state names ends in s, searching from pos and counting the comments nested inside
+        it where they nest: the position after its closing, or the state still open at the line's end."""
+        syn = self.syntax
+        _, k, depth, closer, jsx = state
+        b = syn.blocks[k]
+        if b.mode in ("col0", "alone") and pos:
+            return state   # these close only on a line of their own, not on the line that opens them
+        if b.mode == "col0":
+            m = syn.close_res[k].match(s)
+            return m.end() if m else state
+        if b.mode == "alone":
+            t = s.strip()
+            if syn.close_res[k].fullmatch(t):
+                return len(s) if depth == 1 else ("b", k, depth - 1, closer, jsx)
+            if b.nests and syn.open_res[k].fullmatch(t):
+                return ("b", k, depth + 1, closer, jsx)
+            return state
+        if b.mode == "re":
+            m = syn.close_res[k].search(s, pos)
+            return m.end() if m else state
+        opener = syn.open_res[k] if b.nests else None
+        while True:
+            c = s.find(closer, pos)
+            o = opener.search(s, pos) if opener else None
+            if o and (c < 0 or o.start() < c):
+                depth, pos = depth + 1, o.end()
+            elif c < 0:
+                return ("b", k, depth, closer, jsx)
+            else:
+                depth, pos = depth - 1, c + len(closer)
+                if not depth:
+                    if jsx:   # JSX's {/* ... */}: the brace closing the comment's braces is not code
+                        rest = s[pos:].lstrip()
+                        if rest.startswith("}"):
+                            pos = len(s) - len(rest) + 1
+                    return pos
+
+    def literal_end(self, s, pos, f, closer):
+        """Where a literal of form f, closing at closer, ends in s, searching from pos: the position after it, or -1."""
+        if f.kind in ("raw", "raw1"):
+            if f.esc == "re":
+                m = re.compile(closer).search(s, pos)
+                return m.end() if m else -1
+            k = s.find(closer, pos)
+            return k + len(closer) if k >= 0 else -1
+        key = (f.kind, closer, f.esc)
+        pattern = self.syntax.inside_res.get(key)
+        if pattern is None:
+            doubled = E(closer) * 2 + "|" if f.kind in ("dbl", "dbl1", "both", "both1") else ""
+            escaped = E(f.esc) + r"[\s\S]|" if f.kind in ("esc", "esc1", "both", "both1") and f.esc else ""
+            pattern = self.syntax.inside_res[key] = re.compile(escaped + doubled + E(closer))
+        for m in pattern.finditer(s, pos):
+            if m.group() == closer:
+                return m.end()
+        return -1
+
+
+JS_REGEX = re.compile(r"/(?![*/])(?:\\.|\[(?:\\.|[^\]\\\n])*\]|[^/\\\[\n])+/[A-Za-z]*")
+JS_WORDS = {"return", "typeof", "case", "do", "else", "in", "of", "new", "delete", "void", "throw", "yield", "await",
+            "instanceof", "export", "default"}
+JS_CODE = re.compile(r"(?P<J>\{(?=/\*))|(?P<B>/\*)|(?P<L>//)|(?P<Q>['\"])|(?P<T>`)|(?P<R>/)|(?P<O>\{)|(?P<C>\})")
+JS_TEXT = re.compile(r"\\[\s\S]|`|\$\{")
+
+
+class JsLines(Lines):
+    """JavaScript's and TypeScript's reader: Lines for their comments and quoted strings, and besides a template
+    literal's text and its ${...} expressions, nested to any depth, a regular expression literal (told from a
+    division by what comes before it, as a parser tells them), and JSX's comment {/* ... */}. Its state is None, or
+    (frames, inner): the templates and expressions open around the reading (a template as "`", an expression as the
+    number of braces open in it), and the comment or quoted string open inside them."""
+
+    def read(self, line, state, bare=None):
+        s = line[1:] if line[:1] == "\ufeff" else line
+        if not s.strip():
+            return BLANK, state
+        frames, inner_state = state if state is not None else ((), None)
+        n = len(s)
+        pos = n - len(s.lstrip())
+        code = False
+        if inner_state is None and not frames and s.startswith("#!", pos):
+            return COMMENT, None   # a script's first line
+        last = ""   # the code before pos on this line, for telling a regular expression from a division
+        while pos < n:
+            if inner_state is not None:
+                if inner_state[0] == "b":
+                    end = self.inside(s, pos, inner_state)
+                    if isinstance(end, tuple):
+                        inner_state = end
+                        break
+                    inner_state, pos = None, end
+                else:
+                    end = self.literal_end(s, pos, self.syntax.literals[inner_state[1]], inner_state[2])
+                    code = True
+                    if end < 0:
+                        tail = s.rstrip("\r")
+                        run = len(tail) - len(tail.rstrip("\\"))
+                        inner_state = inner_state if run % 2 else None
+                        break
+                    inner_state, pos, last = None, end, "a"
+                continue
+            if frames and frames[-1] == "`":   # a template's text
+                m = JS_TEXT.search(s, pos)
+                if m or s[pos:].strip():
+                    code = True
+                if not m:
+                    break
+                pos = m.end()
+                if m.group() == "`":
+                    frames, last = frames[:-1], "a"
+                elif m.group() == "${":
+                    frames, last = frames + (0,), "("
+                continue
+            m = JS_CODE.search(s, pos)
+            end = m.start() if m else n
+            text = s[pos:end].rstrip()
+            if text.strip():
+                code, last = True, text
+            if not m:
+                break
+            g, pos = m.lastgroup, m.end()
+            if g == "J":   # {/* at a line's start: JSX's comment, whose braces are not code
+                if not code:
+                    inner_state, pos = ("b", 0, 1, "*/", True), pos + 2
+                    continue
+                g = "O"
+            if g == "B":
+                inner_state = ("b", 0, 1, "*/", False)
+            elif g == "L":
+                break
+            elif g == "Q":
+                code, inner_state = True, ("s", 0 if m.group() == "'" else 1, m.group())
+            elif g == "T":
+                code, frames = True, frames + ("`",)
+            elif g == "R":
+                word = re.search(r"[\w$]+$", last)
+                regex = JS_REGEX.match(s, m.start())
+                if regex and (not last or last[-1] in "(,=:[!&|?{};+-*%<>~^" or (word and word.group() in JS_WORDS)):
+                    pos = regex.end()
+                code, last = True, "a" if regex else "/"
+            elif g == "O":
+                code, last = True, "{"
+                if frames:
+                    frames = frames[:-1] + (frames[-1] + 1,)
+            else:   # }
+                code, last = True, "}"
+                if frames:
+                    frames = frames[:-1] if frames[-1] == 0 else frames[:-1] + (frames[-1] - 1,)
+        state = None if not frames and inner_state is None else (frames, inner_state)
+        return (CODE if code else COMMENT), state
+
+
+PHP_OPEN = re.compile(r"(?i)<\?(?:php(?=\s|$)|=|(?=\s|$))|<!--")
+
+
+class PhpLines(Lines):
+    """PHP's reader: a PHP file starts as HTML, whose comments are <!-- -->, until <?php (or <?=) opens PHP, whose
+    comments and literals Lines reads, until ?> closes it again, even inside a line comment. Its state is Lines'
+    inside PHP, or ("html",) or ("html-comment",) outside it."""
+    initial, middle = ("html",), None
+
+    def read(self, line, state, bare=None):
+        s = line[1:] if line[:1] == "\ufeff" else line
+        if not s.strip():
+            return BLANK, state
+        n, pos, code = len(s), 0, False
+        while pos < n:
+            if state == ("html-comment",):
+                k = s.find("-->", pos)
+                if k < 0:
+                    break
+                state, pos = ("html",), k + 3
+            elif state == ("html",):
+                m = PHP_OPEN.search(s, pos)
+                if s[pos:m.start() if m else n].strip():
+                    code = True
+                if not m:
+                    break
+                pos = m.end()
+                if m.group() == "<!--":
+                    state = ("html-comment",)
+                else:
+                    code, state = True, None
+            else:
+                if state is None and not s[:pos].strip():   # PHP from the line's start
+                    start = self.start(s, bare)
+                    if start is None:
+                        break
+                    here, state, pos = start
+                    code = code or here
+                here, state, stop = self.scan(s, pos, state, False, bare)
+                code = code or here
+                if stop >= n:
+                    break
+                state, pos = ("html",), stop + 2
+        return (CODE if code else COMMENT), state
+
+
+class PyLines(LineReader):
+    """Python's line reader, for a file Python's tokenizer cannot read (see PythonReader): docstrings and other
+    strings standing alone as statements are block comments, and a triple-quoted string opened after code
+    (x = \"\"\") is code to its end, its closing quotes opening nothing. A string starting its own line inside a call
+    or a list reads as a docstring, where the tokenizer would know better."""
+    exact = False
+
+    def read(self, line, state):
+        s = line.strip()
+        if s[:1] == "\ufeff":
+            s = s[1:].lstrip()
+        if not s:
+            return BLANK, state
+        if state is not None and state[0] == "str":   # inside a string opened after code: code to its end
+            if state[1] in s:
+                quote = open_string(s, state[1])
+                return CODE, (("str", quote) if quote else None)
+            return CODE, state
+        code = False
+        while True:
+            if state is not None:   # inside a docstring
+                k = s.find(state[1])
+                if k < 0:
+                    return (CODE if code else COMMENT), state
+                s, state = s[k + 3:].strip(), None
+                if not s:
+                    return (CODE if code else COMMENT), None
+            doc = DOCSTRING.match(s)
+            if not doc:
+                break
+            quote, s = doc.group(1), s[doc.end():]
+            state = ("doc", quote)
+        if s.startswith("#"):
+            return (CODE if code else COMMENT), None
+        if '"""' in s or "'''" in s:
+            quote, header = open_string(s), HEADER_DOCSTRING.match(s)
+            if quote and header and header.group(1) == quote and quote not in s[header.end():]:
+                return CODE, ("doc", quote)   # def f(): """Doc... opens a docstring after the header's code
+            if quote:
+                return CODE, ("str", quote)
+        return CODE, None
+
+
+DOCSTRING = re.compile(r"""(?i)(?:[rubf]{1,2})?('''|\"\"\")""")
+HEADER_DOCSTRING = re.compile(r"""(?:async\s+def|def|class)\b[^#]*:\s*(?:[rRuUbBfF]{1,2})?('''|\"\"\")""")
+
+
+def open_string(s, quote=None):
+    """The triple quote a line of Python leaves open at its end, given the one open at its start, or None. A #
+    outside a string ends the line; a backslash escapes the character after it; an ordinary string stays on its
+    line."""
+    i, n = 0, len(s)
+    while i < n:
+        c = s[i]
+        if quote:
+            if c == "\\":
+                i += 2
+            elif s.startswith(quote, i):
+                quote, i = None, i + 3
+            else:
+                i += 1
+        elif c == "#":
+            return None
+        elif c in "'\"":
+            if s.startswith(c * 3, i):
+                quote, i = c * 3, i + 3
+            else:
+                i += 1
+                while i < n and s[i] != c:
+                    i += 2 if s[i] == "\\" else 1
+                i += 1
+        else:
+            i += 1
+    return quote
+
+
+def token_types(*names):
+    return {getattr(tokenize, name) for name in names if hasattr(tokenize, name)}
+
+
+F_PARTS = token_types("FSTRING_START", "FSTRING_MIDDLE", "FSTRING_END")   # an f-string, read in parts (3.12 on)
+F_START, F_END = token_types("FSTRING_START"), token_types("FSTRING_END")
+T_START, T_END = token_types("TSTRING_START"), token_types("TSTRING_END")   # a template string (3.14 on)
+BRACKETS = {"(": 1, "[": 1, "{": 1, ")": -1, "]": -1, "}": -1}
+COMPOUND = {"def", "class", "if", "elif", "else", "for", "while", "try", "except", "finally", "with", "async", "match",
+            "case"}   # the words that open a compound statement, whose header's colon a body may follow
+
+
+class ReadFailed(Exception):
+    """Python's tokenizer could not read a file."""
+
+
+class PythonReader:
+    """Python and Cython, read by Python's own tokenizer (tokenize), with Python's docstring rule: a statement that
+    is only a string (a docstring, or a string standing alone as a block comment) is a comment; bytes are code. A
+    reading starts where the tokenizer can be put exactly as the whole file would have it, errors included: where a
+    statement ends outside any bracket, its state the indentation open there (the tuple of each level's leading
+    whitespace); and inside a statement already known to be code, between the lines of its brackets ("(", the
+    indentation, the brackets open, its first word) or of its triple-quoted string ('"', the same, and the string's
+    opening). Every other boundary, inside a statement that may yet prove a docstring or inside an f-string, is
+    UNREAD. A file the tokenizer cannot read (mixed tabs, a stray null byte) is read by PyLines instead,
+    approximately."""
+    initial = ()
+    exact = True
+
+    def __init__(self):
+        self.fallback = PyLines()
+
+    def session(self, get, n, eol, b, stack, stop):
+        """Reads lines b and on, from boundary b in the state stack, until stop(k, state) says so at a boundary k
+        where a reading can start: (kinds of lines b to k - 1, states at boundaries b + 1 to k, k). Raises
+        ReadFailed where the tokenizer fails."""
+        opened, first, pure, opening = [], "", None, ""
+        if stack and stack[0] in ("(", '"'):   # inside a statement of code: its brackets, and perhaps a string
+            opened, first, pure = list(stack[2]), stack[3], False
+            opening = stack[4] if stack[0] == '"' else ""
+            stack = stack[1]
+        prefix = ["if 1:\n"] + [w + "if 1:\n" for w in stack[:-1]] + [stack[-1] + "pass\n"] if stack else []
+        if pure is False:   # the statement's start, as far as the tokenizer's state goes: its word, brackets, string
+            prefix.append((first or "0") + " " + "".join(opened) + opening + "\n")
+        top, feed = len(prefix), {"next": b}
+
+        def readline():
+            if prefix:
+                return prefix.pop(0)
+            i = feed["next"]
+            if i >= n:
+                return ""
+            feed["next"] = i + 1
+            text = get(i)
+            if i == 0 and text[:1] == "\ufeff":
+                text = text[1:]
+            return text + ("\n" if i < n - 1 or eol else "")
+
+        marks, clean, levels, strings = set(), {}, list(stack), []   # strings: the f- and t-strings open
+        k, shift = n, b - top - 1   # where the reading stops; a token's row, less shift, is its line
+        # The statement being read: pure is None before its first token, "(" while it holds only parentheses, True
+        # while only strings and parentheses, False once it holds code. held: the rows of its tokens while it may
+        # still be only strings; exprs: those of the expressions in its f-strings' braces, which are code anyway.
+        # opened: the brackets open in it; first: its first word, which may open a compound statement.
+        held, exprs = [], []
+        STRING, OP, NAME, NL, NEWLINE = tokenize.STRING, tokenize.OP, tokenize.NAME, tokenize.NL, tokenize.NEWLINE
+        INDENT, DEDENT, skip = tokenize.INDENT, tokenize.DEDENT, (tokenize.COMMENT, tokenize.ENCODING, tokenize.ENDMARKER)
+
+        def mark(rows):
+            for a, z in rows:
+                if a == z:
+                    marks.add(a)
+                else:
+                    marks.update(range(a, z + 1))
+
+        try:
+            for tok in tokenize.generate_tokens(readline):
+                t, text, a, z = tok[0], tok[1], tok[2][0] + shift, tok[3][0] + shift
+                if z < b:
+                    continue   # the prefix's own
+                if t == NEWLINE or t == NL:
+                    if t == NEWLINE or (not opened and not strings and pure is None):
+                        if pure is True:
+                            mark(exprs)
+                        elif pure == "(":
+                            mark(held)
+                        pure, held, exprs, first, opened = None, [], [], "", []
+                        clean[a + 1] = state = tuple(levels)
+                    elif opened and not strings and pure is False:   # between the lines of a statement of code
+                        clean[a + 1] = state = ("(", tuple(levels), "".join(opened), first)
+                    else:
+                        continue
+                    if stop(a + 1, state):
+                        k = a + 1
+                        break
+                    continue
+                if t == INDENT:
+                    levels.append(text)
+                    continue
+                if t == DEDENT:
+                    if levels:
+                        levels.pop()
+                    continue
+                if t in skip:
+                    continue
+                if t == OP and not opened and not strings and (text == ";" or text == ":" and first in COMPOUND):
+                    if text == ":":   # a compound statement's header: a body may follow it on its line
+                        marks.add(a)
+                    if pure is True:
+                        mark(exprs)
+                    elif pure == "(":
+                        mark(held)
+                    pure, held, exprs, first = None, [], [], ""
+                    continue
+                if t == OP and text in BRACKETS:
+                    if BRACKETS[text] > 0:
+                        opened.append(text)
+                    elif opened:
+                        opened.pop()
+                if t in F_START:
+                    strings.append("f")
+                elif t in T_START:
+                    strings.append("t")
+                if pure is None:
+                    first = text if t == NAME else ""
+                if pure is False:
+                    if a == z:
+                        marks.add(a)
+                    else:
+                        marks.update(range(a, z + 1))
+                        quote = text.find(text[-1]) if t == STRING else -1
+                        if quote >= 0 and text[quote:quote + 3] == text[-1] * 3 and not strings:
+                            # inside a triple-quoted string of a statement of code: a reading can start there
+                            state = None
+                            for inner in range(max(a, b) + 1, z + 1):
+                                clean[inner] = state = ('"', tuple(levels), "".join(opened), first,
+                                                        text[:quote + 3])
+                                if stop(inner, state):
+                                    k = inner
+                                    break
+                            if k < n:
+                                break
+                else:
+                    in_f = bool(strings) and "t" not in strings
+                    if in_f or t in F_PARTS or (t == STRING and "b" not in text[:text.find(text[-1])].lower()):
+                        pure = True
+                        held.append((a, z))
+                        if in_f and t not in F_PARTS:
+                            exprs.append((a, z))
+                    elif t == OP and text in "()" and not strings:
+                        pure = pure or "("
+                        held.append((a, z))
+                    else:
+                        mark(held)
+                        mark(((a, z),))
+                        pure, held, exprs = False, [], []
+                if (t in F_END or t in T_END) and strings:
+                    strings.pop()
+        except (tokenize.TokenError, SyntaxError, ValueError, IndexError):
+            raise ReadFailed() from None
+        if pure is True:
+            mark(exprs)
+        elif pure == "(":
+            mark(held)
+        kinds = []
+        for i in range(b, k):
+            text = get(i)
+            if i == 0 and text[:1] == "\ufeff":
+                text = text[1:]
+            kinds.append(BLANK if not text.strip() else CODE if i in marks else COMMENT)
+        return kinds, [clean.get(j, UNREAD) for j in range(b + 1, k + 1)], k
+
+
+class Indented(LineReader):
+    """A reader for an indented syntax, whose comment runs over the lines indented beneath its first, whatever
+    they hold (Sass's .sass files, Pug, Slim, Haml): state None, or the indentation of the comment's first line."""
+
+    def __init__(self, markers):
+        self.markers = re.compile(markers)
+
+    def read(self, line, state):
+        s = line[1:] if line[:1] == "\ufeff" else line
+        if not s.strip():
+            return BLANK, state
+        indent = len(s) - len(s.lstrip())
+        if state is not None and indent > state:
+            return COMMENT, state
+        if self.markers.match(s, indent):
+            return COMMENT, indent
+        return CODE, None
+
+
+class Literate(LineReader):
+    """A literate source, prose around code, whose prose reads as comment and code as its language reads it: Bird
+    tracks (> at the start of a line) and \\begin{code} blocks in literate Haskell and Idris and LaTeX literate Agda
+    (style tex), fenced blocks in Markdown and Typst literate Agda (md: a bare fence or ```agda holds code, a fence
+    naming another language an example), src blocks in Org (org), and indented blocks in literate CoffeeScript
+    (indent). Its state is (where the reading is: prose, code or example; the code reader's state)."""
+    initial = ("prose", None)
+
+    def __init__(self, code, style):
+        self.code, self.style = code, style
+        self.initial, self.middle = ("prose", code.initial), ("code", code.middle)
+
+    def read(self, line, state):
+        where, inside = state
+        s = line.strip()
+        if s[:1] == "\ufeff":
+            s = s[1:].lstrip()
+        if not s:
+            return BLANK, state
+        style = self.style
+        if style == "tex":
+            if line.startswith(">"):   # a Bird track: the rest of the line is code
+                kind, inside = self.code.read(line[1:], inside)
+                return kind, (where, inside)
+            if s.startswith(("\\begin{code}", "\\end{code}")):
+                return COMMENT, ("code" if s.startswith("\\begin") else "prose", inside)
+        elif style == "md" and s.startswith("```"):
+            info = s.strip("`").strip().lower()
+            if info or where == "prose":   # a fence naming a language opens a block; a bare one only outside one
+                return COMMENT, ("code" if info in ("", "agda") else "example", inside)
+            return COMMENT, ("prose", inside)
+        elif style == "org" and s.lower().startswith(("#+begin_src", "#+end_src")):
+            return COMMENT, ("code" if s.lower().startswith("#+begin_src agda") else "prose", inside)
+        elif style == "indent":
+            if line.startswith(("    ", "\t")):
+                kind, inside = self.code.read(line, inside)
+                return kind, (where, inside)
+            return COMMENT, state
+        if where == "code":
+            kind, inside = self.code.read(line, inside)
+            return kind, (where, inside)
+        return COMMENT, state
+
+
+LITERATE = {".lhs": "tex", ".lidr": "tex", ".lagda": "tex", ".lagda.tex": "tex", ".lagda.md": "md",
+            ".lagda.typ": "md", ".lagda.org": "org", ".litcoffee": "indent", ".coffee.md": "indent"}
+
+
+def literate_style(path):
+    name = path.replace("\\", "/").rsplit("/", 1)[-1].lower()
+    return next((style for suffix, style in LITERATE.items() if name.endswith(suffix)), None)
+
+
+# Every counted language's syntax (see Syntax). A plain prefix is escaped (SL); C-family strings are quoted and
+# escaped with a backslash on one line (Q1) and character literals are read whole (C_CHAR, and PRIME_CHAR where a
+# name may end in a quote, as Haskell's foldl' does, or a quote opens a lifetime, as Rust's 'a does).
+SL = lambda *p: tuple(E(x) for x in p)   # noqa: E731
+Q1 = lambda q: lit("esc1", E(q), q)      # noqa: E731
+QM = lambda q: lit("esc", E(q), q)       # noqa: E731
+C_CHAR = lit("skip", r"(?:(?<=u8)|(?<![0-9]))'(?:\\.|[^\\'\n])+'")   # after a digit, C++'s 1'000 separator
+PRIME_CHAR = lit("skip", r"(?<![\w'])b?'(?:\\.[^'\s]*|[^\\'\n])'")
+C_BLOCK, C_NEST = blk("/*", "*/"), blk("/*", "*/", nests=True)
+C_STR = (Q1('"'), C_CHAR)
+CPP_STR = (lit("raw", r'(?:u8|[uUL])?R"([^()\\\s]{0,16})\(', '){0}"'),) + C_STR
+PY_LIKE = (QM("'''"), QM('"""'), Q1("'"), Q1('"'))
+HTML_BLOCK = blk("<!--", "-->")
+HS_LINE = (r"--+(?![-!#$%&*+./<=>?@\\^|~:])",)   # --> is an operator, not a comment
+HS_BLOCK = Block(r"\{-(?!#)", "-}", True, "any", False)   # {-# LANGUAGE #-} is a pragma, not a comment
+ML_NEST = blk("(*", "*)", nests=True)
+ML_NEST_NO_OP = Block(r"\(\*(?!\))", "*)", True, "any", False)   # F#'s (*) is the operator, not a comment
+
+
+def c_like(line=("//",), blocks=(C_BLOCK,), literals=C_STR, **more):
+    return Syntax(line=SL(*line), blocks=blocks, literals=literals, **more)
+
+
+def hash_like(literals=(), tracked=True, **more):
+    return Syntax(line=SL("#"), literals=literals, tracked=tracked and bool(literals), **more)
+
+
+SYNTAXES = {
+    **{lang: c_like() for lang in ("C", "Objective-C++", "Solidity", "GLSL", "HLSL", "Protocol Buffer", "AIDL",
+                                   "Stan", "Verilog", "SystemVerilog", "ShaderLab", "Processing", "Yacc", "Lex",
+                                   "SWIG", "XS", "SmPL", "Pawn", "OpenSCAD", "Move", "ANTLR", "Asymptote")},
+    **{lang: c_like(literals=CPP_STR) for lang in ("C++", "Cuda", "Metal")},
+    "C#": c_like(literals=(lit("raw", r'\$*("{3,})', "{0}"), lit("dbl", r'\$?@\$?"', '"')) + C_STR),
+    "Java": c_like(literals=(QM('"""'),) + C_STR),
+    "Kotlin": c_like(line=("//", "#!"), blocks=(C_NEST,), literals=(lit("raw", E('"""'), '"""'),) + C_STR),
+    "Scala": c_like(line=("//", "#!"), blocks=(C_NEST,), literals=(lit("raw", E('"""'), '"""'), Q1('"'), PRIME_CHAR)),
+    "Swift": c_like(line=("//", "#!"), blocks=(C_NEST,), literals=(
+        lit("raw", r'(#+)"""', '"""{0}'), lit("raw1", r'(#+)"', '"{0}'), QM('"""'), Q1('"'))),
+    "Go": c_like(literals=(lit("raw", "`", "`"),) + C_STR),
+    "Rust": c_like(blocks=(C_NEST,), literals=(lit("raw", r'(?<![\w])[bc]?r(#*)"', '"{0}'), QM('"'), PRIME_CHAR)),
+    "Dart": c_like(line=("//", "#!"), blocks=(C_NEST,), literals=(
+        lit("raw", r"(?<!\w)r'''", "'''"), lit("raw", r'(?<!\w)r"""', '"""'), QM("'''"), QM('"""'),
+        lit("raw1", r"(?<!\w)r'", "'"), lit("raw1", r'(?<!\w)r"', '"'), Q1("'"), Q1('"'))),
+    **{lang: c_like(line=("//", "#!"), literals=(QM("'''"), QM('"""'), Q1("'"), Q1('"')))
+       for lang in ("Groovy", "Gradle", "Nextflow")},
+    "D": c_like(line=("//", "#!"), blocks=(C_BLOCK, blk("/+", "+/", nests=True)), literals=(
+        lit("raw", r'(?<!\w)r"', '"'), lit("raw", "`", "`"), QM('"'), C_CHAR)),
+    "Zig": c_like(literals=(lit("eol", r"\\\\"),) + C_STR),
+    "Odin": c_like(blocks=(C_NEST,), literals=(lit("raw", "`", "`"),) + C_STR),
+    "WGSL": c_like(blocks=(C_NEST,)),
+    "Vala": c_like(literals=(lit("raw", E('"""'), '"""'),) + C_STR),
+    "Haxe": c_like(literals=(QM("'"), QM('"'))),
+    "Apex": c_like(literals=(Q1("'"),)),
+    "Thrift": c_like(line=("//", "#"), literals=(Q1('"'), Q1("'"))),
+    "Jsonnet": c_like(line=("//", "#"), literals=(lit("raw", r"\|\|\|-?", "|||"), lit("dbl1", E('@"'), '"'),
+                                                  lit("dbl1", E("@'"), "'"), Q1('"'), Q1("'"))),
+    "CUE": c_like(literals=(QM('"""'), QM("'''"), Q1('"'), Q1("'"))),
+    "Pkl": c_like(literals=(QM('"""'), Q1('"'))),
+    "Bicep": c_like(literals=(lit("raw", "'''", "'''"), Q1("'"))),
+    "Carbon": c_like(literals=(lit("raw", "'''", "'''"),) + C_STR),
+    "Cairo": c_like(literals=(Q1('"'), Q1("'"))),
+    "Gleam": c_like(literals=(QM('"'),)),
+    "ReScript": c_like(literals=(lit("esc", "`", "`"), Q1('"'), PRIME_CHAR)),
+    "Reason": c_like(literals=(lit("raw", r"\{([a-z_]*)\|", "|{0}}"), Q1('"'), PRIME_CHAR)),
+    "Dafny": c_like(literals=(lit("dbl", E('@"'), '"'), Q1('"'), PRIME_CHAR)),
+    "GraphQL": Syntax(line=SL("#"), literals=(QM('"""'), Q1('"'))),
+    "CSS": c_like(literals=(lit("raw1", r"url\((?!\s*[\"'])", ")"), Q1('"'), Q1("'"))),
+    "SQL": Syntax(line=SL("--"), start=SL("#"), blocks=(C_BLOCK,), literals=(
+        lit("both1", "'", "'"), lit("dbl1", '"', '"'), lit("raw1", "`", "`"))),
+    "PHP": Syntax(line=(E("//"), r"#(?!\[)"), blocks=(C_BLOCK,), literals=(
+        QM("'"), QM('"'), lit("here", r"<<<[ \t]*[\"']?([A-Za-z_]\w*)[\"']?")), exits=r"\?>"),
+    "Hack": Syntax(line=(E("//"), r"#(?!\[)"), blocks=(C_BLOCK,), literals=(
+        QM("'"), QM('"'), lit("here", r"<<<[ \t]*[\"']?([A-Za-z_]\w*)[\"']?"))),
+    "Lua": Syntax(line=SL("--"), blocks=(Block(r"--\[(=*)\[", "]{0}]", False, "any", False),), literals=(
+        lit("raw", r"\[(=*)\[", "]{0}]"), Q1('"'), Q1("'"))),
+    "Luau": Syntax(line=SL("--"), blocks=(Block(r"--\[(=*)\[", "]{0}]", False, "any", False),), literals=(
+        lit("raw", r"\[(=*)\[", "]{0}]"), Q1('"'), Q1("'"), Q1("`"))),
+    "Haskell": Syntax(line=HS_LINE, blocks=(HS_BLOCK,), literals=(Q1('"'), PRIME_CHAR)),
+    "Elm": Syntax(line=HS_LINE, blocks=(HS_BLOCK,), literals=(QM('"""'), Q1('"'), PRIME_CHAR)),
+    "PureScript": Syntax(line=HS_LINE, blocks=(HS_BLOCK,), literals=(lit("raw", E('"""'), '"""'), Q1('"'),
+                                                                     PRIME_CHAR)),
+    "Agda": Syntax(line=HS_LINE, blocks=(HS_BLOCK,), literals=(Q1('"'), PRIME_CHAR)),
+    "Idris": Syntax(line=HS_LINE, blocks=(HS_BLOCK,), literals=(QM('"""'), Q1('"'), PRIME_CHAR)),
+    "Dhall": Syntax(line=SL("--"), blocks=(blk("{-", "-}", nests=True),), literals=(
+        lit("raw", "''", r"''(?!')", esc="re"), Q1('"'))),
+    "Lean": Syntax(line=SL("--"), blocks=(blk("/-", "-/", nests=True),), literals=(QM('"'), PRIME_CHAR)),
+    "OCaml": Syntax(blocks=(ML_NEST,), literals=(lit("raw", r"\{([a-z_]*)\|", "|{0}}"), QM('"'), PRIME_CHAR)),
+    "Standard ML": Syntax(blocks=(ML_NEST,), literals=(lit("skip", r'#"(?:\\.|[^"\\])"'), QM('"'))),
+    "F#": Syntax(line=SL("//"), blocks=(ML_NEST_NO_OP,), literals=(
+        lit("raw", E('"""'), '"""'), lit("dbl", r'\$?@\$?"', '"'), QM('"'), PRIME_CHAR)),
+    "F*": Syntax(line=SL("//"), blocks=(ML_NEST_NO_OP,), literals=(QM('"'), PRIME_CHAR)),
+    "Rocq Prover": Syntax(blocks=(ML_NEST,), literals=(lit("dbl", '"', '"'),)),
+    "Isabelle": Syntax(blocks=(ML_NEST,), literals=(lit("raw", '"', '"'), lit("raw", "\u2039", "\u203a"))),
+    "Wolfram": Syntax(blocks=(ML_NEST,), literals=(QM('"'),)),
+    "AppleScript": Syntax(line=SL("--", "#"), blocks=(ML_NEST,), literals=(Q1('"'),)),
+    "Pascal": Syntax(line=SL("//"), blocks=(Block(r"\{(?!\$)", "}", False, "any", False),
+                                             Block(r"\(\*(?!\$)", "*)", False, "any", False)),
+                     literals=(lit("dbl1", "'", "'"),)),   # {$IFDEF} and (*$R+*) are compiler directives: code
+    "TLA": Syntax(line=SL("\\*"), blocks=(ML_NEST,), literals=(Q1('"'),)),
+    "WebAssembly": Syntax(line=SL(";;"), blocks=(blk("(;", ";)", nests=True),), literals=(Q1('"'),)),
+    "Nim": Syntax(line=SL("#"), blocks=(blk("##[", "]##", nests=True), blk("#[", "]#", nests=True)), literals=(
+        lit("raw", E('"""'), '"""'), lit("dbl1", r'(?<!\w)[rR]"', '"'), Q1('"'), C_CHAR)),
+    "Julia": Syntax(line=SL("#"), blocks=(blk("#=", "=#", nests=True),), literals=(
+        QM('"""'), QM('"'), QM("```"), QM("`"), lit("skip", r"(?<![\w)\]}'.])'(?:\\.[^'\s]*|[^\\'\n])'"))),
+    "PowerShell": Syntax(line=SL("#"), blocks=(blk("<#", "#>"),), literals=(
+        lit("raw", r'@"(?=\s*$)', r'^"@', esc="re"), lit("raw", r"@'(?=\s*$)", r"^'@", esc="re"),
+        lit("esc", '"', '"', esc="`"), lit("dbl", "'", "'"))),
+    "CoffeeScript": Syntax(line=SL("#"), start_blocks=(Block(r"###(?!#)", "###", False, "any", False),), literals=(
+        lit("raw", "///", "///"), QM('"""'), QM("'''"), QM('"'), QM("'"))),
+    "Elixir": Syntax(line=SL("#"), literals=(QM('"""'), QM("'''"), QM('"'), QM("'"), lit("skip", r"\?(?:\\.|\S)"))),
+    "Erlang": Syntax(line=SL("%"), literals=(QM('"""'), QM('"'), Q1("'"), lit("skip", r"\$(?:\\.|.)"))),
+    "Prolog": Syntax(line=SL("%"), blocks=(C_BLOCK,), literals=(
+        lit("skip", r"(?<!\w)0'(?:\\.|''|.)"), QM('"'), Q1("'"))),
+    "R": Syntax(line=SL("#"), literals=(QM('"'), QM("'"), lit("raw1", "`", "`"))),
+    "Meson": Syntax(line=SL("#"), literals=(lit("raw", "'''", "'''"), Q1("'"))),
+    "GAP": Syntax(line=SL("#"), literals=(lit("raw", E('"""'), '"""'), Q1('"'), C_CHAR)),
+    "jq": Syntax(line=SL("#"), literals=(Q1('"'),)),
+    "Cap'n Proto": Syntax(line=SL("#"), literals=(Q1('"'),)),
+    "Open Policy Agent": Syntax(line=SL("#"), literals=(lit("raw", "`", "`"), Q1('"'))),
+    "Janet": Syntax(line=SL("#"), literals=(lit("raw", r"(`+)", "{0}"), QM('"'))),
+    **{lang: Syntax(line=SL("#"), literals=PY_LIKE) for lang in ("Starlark", "Mojo", "Sage", "Vyper", "GDScript")},
+    **{lang: Syntax(line=SL(";"), blocks=(blk("#|", "|#", nests=True),), literals=(
+        lit("skip", r"#\\(?:x[0-9a-fA-F]+|[A-Za-z]+|.)"), QM('"'))) for lang in ("Common Lisp", "Scheme", "Racket")},
+    "Emacs Lisp": Syntax(line=SL(";"), literals=(lit("skip", r"(?<![\w-])\?\\?."), QM('"'))),
+    "Clojure": Syntax(line=SL(";"), literals=(lit("skip", r"\\(?:newline|space|tab|u[0-9a-fA-F]{4}|.)"), QM('"'))),
+    "Fennel": Syntax(line=SL(";"), literals=(QM('"'),)),
+    "Hy": Syntax(line=SL(";"), literals=(lit("raw", r"#\[(\w*)\[", "]{0}]"), QM('"'))),
+    "CMake": Syntax(line=SL("#"), blocks=(Block(r"#\[(=*)\[", "]{0}]", False, "any", False),), literals=(
+        lit("raw", r"\[(=*)\[", "]{0}]"), QM('"'))),
+    "Nix": Syntax(line=SL("#"), blocks=(C_BLOCK,), literals=(lit("raw", "''", r"''(?![$'\\])", esc="re"), QM('"'))),
+    "Alloy": c_like(line=("//", "--")),
+    "AMPL": c_like(line=("#",)),
+    # languages read at the start of each line only (see Syntax): their literals cannot be followed line by line
+    **{lang: hash_like() for lang in ("Shell", "Nushell", "Makefile", "Dockerfile", "Crystal", "Tcl", "Awk", "sed",
+                                      "Just", "Procfile", "Gnuplot", "Earthly", "BitBake", "GDB", "Gherkin", "NASL",
+                                      "QMake", "RobotFramework")},
+    "Perl": hash_like(start_blocks=(Block(r"=[A-Za-z]", r"=cut\b", False, "col0", True),
+                                    Block(r"__(?:END|DATA)__\s*$", r"(?!)", False, "col0", False))),
+    "Ruby": hash_like(start_blocks=(Block(r"=begin\b", r"=end\b", False, "col0", True),
+                                    Block(r"__END__\s*$", r"(?!)", False, "col0", False))),
+    "Raku": hash_like(start_blocks=(Block(r"=begin\b", r"^\s*=end\b", False, "re", True),)),
+    "M4": Syntax(line=SL("#"), start=(r"dnl(?![\w])",), tracked=False),
+    "MATLAB": Syntax(line=SL("%"), start_blocks=(Block(r"%\{", r"%\}", True, "alone", False),), tracked=False),
+    "Scilab": Syntax(line=SL("//"), blocks=(C_BLOCK,), tracked=False),
+    "Stata": Syntax(line=SL("//"), start=SL("*"), blocks=(C_BLOCK,), tracked=False),
+    "SAS": Syntax(start_blocks=(Block(r"%?\*", r";", False, "re", False),), blocks=(C_BLOCK,), tracked=False),
+    "Macaulay2": Syntax(line=SL("--"), blocks=(blk("-*", "*-"),), tracked=False),
+    "Typst": Syntax(line=SL("//"), blocks=(C_BLOCK,), tracked=False),
+    "Forth": Syntax(line=(r"\\(?=\s|$)",), blocks=(Block(r"\((?=\s)", ")", False, "any", False),), tracked=False),
+    "Fortran": Syntax(line=SL("!"), tracked=False),
+    "Ada": Syntax(line=SL("--"), tracked=False),
+    "VHDL": Syntax(line=SL("--"), blocks=(C_BLOCK,), tracked=False),
+    "COBOL": Syntax(line=SL("*>"), column=((6, "*/"),), tracked=False),
+    "Assembly": Syntax(line=SL(";", "//", "#"), start=SL("@"), blocks=(C_BLOCK,), tracked=False, code_first=(
+        r"#\s*(?:include|define|undef|ifn?def|if|else|elif|endif|error|warning|pragma|line)\b",)),
+    "LLVM": Syntax(line=SL(";"), tracked=False),
+    "SMT": Syntax(line=SL(";"), tracked=False),
+    "PureBasic": Syntax(line=SL(";"), tracked=False),
+    "MLIR": Syntax(line=SL("//"), tracked=False),
+    "Mermaid": Syntax(line=SL("%%"), tracked=False),
+    "Batchfile": Syntax(start=(r"@?rem(?![\w])", E("::")), tracked=False),
+    "VBScript": Syntax(line=SL("'"), start=(r"rem(?![\w])",), tracked=False),
+    "Visual Basic .NET": Syntax(line=SL("'"), start=(r"rem(?![\w])",), tracked=False),
+    "Vim script": Syntax(line=SL('"', "#"), tracked=False),
+    "HCL": Syntax(line=SL("#", "//"), blocks=(C_BLOCK,), tracked=False),
+    "NSIS": Syntax(line=SL(";", "#"), blocks=(C_BLOCK,), tracked=False),
+    "Inno Setup": Syntax(line=SL(";", "//"), tracked=False),
+    "AutoHotkey": Syntax(line=SL(";"), blocks=(C_BLOCK,), tracked=False),
+    # markup and templates: their comments may follow markup anywhere on a line; they hold no literals to follow
+    "HTML": Syntax(blocks=(HTML_BLOCK, blk("<%#", "%>"), blk("@*", "*@"), blk("<%!--", "--%>"))),
+    "XSLT": Syntax(blocks=(HTML_BLOCK,)),
+    **{lang: Syntax(line=SL("//"), start_blocks=(C_BLOCK,), blocks=(HTML_BLOCK,)) for lang in ("Vue", "Svelte", "Astro")},
+    **{lang: Syntax(blocks=(blk("{#", "#}"), HTML_BLOCK)) for lang in ("Jinja", "Nunjucks")},
+    "Twig": Syntax(line=SL("//"), blocks=(blk("{#", "#}"), C_BLOCK, HTML_BLOCK)),
+    "Blade": Syntax(line=SL("//"), blocks=(blk("{{--", "--}}"), C_BLOCK, HTML_BLOCK)),
+    "Handlebars": Syntax(blocks=(blk("{{!--", "--}}"), blk("{{!", "}}"), HTML_BLOCK)),
+    "Mustache": Syntax(blocks=(blk("{{!", "}}"),)),
+    "EJS": Syntax(blocks=(blk("<%#", "%>"), HTML_BLOCK)),
+    "Liquid": Syntax(blocks=(Block(r"\{%-?\s*comment\s*-?%\}", r"\{%-?\s*endcomment\s*-?%\}", False, "re", False),
+                             Block(r"\{%-?\s*#", r"-?%\}", False, "re", False), HTML_BLOCK)),
+    "Go Template": Syntax(blocks=(Block(r"\{\{-?\s*/\*", r"\*/\s*-?\}\}", False, "re", False), HTML_BLOCK)),
+    "FreeMarker": Syntax(blocks=(blk("<#--", "-->"), HTML_BLOCK)),
+    "ASP.NET": Syntax(blocks=(blk("<%--", "--%>"), HTML_BLOCK)),
+    "Mako": Syntax(line=SL("##"), blocks=(blk("<%doc>", "</%doc>"), HTML_BLOCK)),
+}
+# An extension several languages share counts as Other, and Other is otherwise not code (NOT_CODE). One whose every
+# sharer comments compatibly still holds code, drawn as Other: a header (.h) is C, C++ or Objective-C, which all
+# comment as C does; .m is Objective-C or MATLAB (// and %, /* */ and %{ %}, but not Mathematica's (* *), which
+# would take a function-pointer call such as (*handler)(x) for a comment); .fs is F#, Forth or a GLSL fragment
+# shader; .v is Verilog or Rocq.
+SHARED_CODE = {
+    ".h": SYNTAXES["C++"],
+    ".m": Syntax(line=SL("//", "%"), start_blocks=(C_BLOCK, Block(r"%\{", r"%\}", True, "alone", False)),
+                 tracked=False),
+    ".fs": Syntax(line=(E("//"), r"\\(?=\s|$)"), start_blocks=(ML_NEST_NO_OP, C_BLOCK), tracked=False),
+    ".v": Syntax(line=SL("//"), start_blocks=(C_BLOCK, ML_NEST), tracked=False),
+}
+FIXED_FORM = {".f", ".f77", ".for", ".fpp"}   # fixed-form Fortran, where C, c, * or ! in column 1 is a comment
+READERS = {}
+
+
+def counts_as_code(path, lang):
+    """Whether a file of this language at this path holds lines of code (see NOT_CODE and SHARED_CODE)."""
+    return bool(lang) and (lang not in NOT_CODE or lang == OTHER and os.path.splitext(path.lower())[1] in SHARED_CODE)
+
+
+def reader_for(lang, path):
+    """The reader of a file of this language at this path, and a key naming it: files read alike share a key, so
+    a reading of one file version serves every path it stands at (see Version)."""
+    name = path.replace("\\", "/").rsplit("/", 1)[-1].lower()
+    ext = os.path.splitext(name)[1]
+    style = literate_style(name)
+    if style:
+        key = (lang, style)
+    elif lang in ("Python", "Cython"):
+        key = ("Python",)
+    elif ext == ".sass" or lang in ("Pug", "Slim", "Haml"):
+        key = (lang, ext if ext == ".sass" else "")
+    elif lang == "Fortran" and ext in FIXED_FORM:
+        key = (lang, "fixed")
+    elif lang == OTHER:
+        key = (lang, ext)
+    else:
+        key = (lang,)
+    reader = READERS.get(key)
+    if reader is None:
+        if style:
+            reader = Literate(reader_for(lang, "x")[0], style)
+        elif key == ("Python",):
+            reader = PythonReader()
+        elif ext == ".sass":
+            reader = Indented(r"/\*|//")
+        elif lang in ("Pug", "Slim", "Haml"):
+            reader = Indented({"Pug": r"//", "Slim": r"/", "Haml": r"-#|/"}[lang])
+        elif key[1:] == ("fixed",):
+            reader = Lines(Syntax(line=SL("!"), column=((0, "Cc*!"),), tracked=False))
+        elif lang in ("JavaScript", "TypeScript", "QML"):
+            reader = JsLines(Syntax(blocks=(C_BLOCK,), literals=(Q1("'"), Q1('"'))))
+        elif lang == "PHP":
+            reader = PhpLines(SYNTAXES["PHP"])
+        else:
+            syntax = SHARED_CODE.get(ext) if lang == OTHER else SYNTAXES.get(lang)
+            reader = Lines(syntax or Syntax())
+        READERS[key] = reader
+    return reader, key
+
+
+class LineKinds:
+    """Consecutive lines of one language read one at a time, as its line reader reads them, from a file's start (or,
+    with at_start False, from part way through one): kind(line) is code, comment or blank. Python's is PyLines, since
+    the tokenizer reads whole statements (see read_lines), which is how coderprint reads every file."""
+
+    def __init__(self, lang, path="", at_start=True):
+        reader = reader_for(lang, path or "x")[0]
+        self.reader = reader.fallback or reader
+        self.state = self.reader.initial if at_start else self.reader.middle
+
+    def kind(self, line):
+        kind, self.state = self.reader.read(line, self.state)
+        return KINDS[kind]
+
+
+def read_lines(reader, get, n, eol):
+    """How every line of a file reads, as its reader reads the whole file: (kinds, one byte a line; the state at
+    each boundary, or None where every state is None; whether the reading is exact, not the fallback's)."""
+    try:
+        kinds, states, _ = reader.session(get, n, eol, 0, reader.initial, never)
+        exact = reader.exact
+        first = reader.initial
+    except ReadFailed:
+        fallback = reader.fallback
+        kinds, states, _ = fallback.session(get, n, eol, 0, fallback.initial, never)
+        exact, first = False, fallback.initial
+    states = [first] + states
+    return bytes(kinds), (None if all(x is None for x in states) else states), exact
+
+
+def state_at(states, k):
+    return None if states is None else states[k]
+
+
+def read_edited(reader, old, get, n, eol, edits):
+    """How the lines of a new file version read, from the old version's reading (old: kinds and states by reader)
+    and the edits that made one from the other, [(old start, old end, new start, new end)] in order: the new file
+    is read only from the last boundary before each edit where a reading can start, until its reading agrees with
+    the old one again, and every other line reads as it did. The result is the whole file's reading, line for line
+    (see LineReader). Raises ReadFailed as the reader does."""
+    old_kinds, old_states = old
+    old_n, m = len(old_kinds), len(edits)
+    kinds = bytearray(n)
+    held = [None if old_states is None else [None] * (n + 1)]   # the states, None while every one is None
+    shift = [0]   # a new line's index less its old one, past the first k edits
+    for o_start, o_end, n_start, n_end in edits:
+        shift.append(shift[-1] + (n_end - n_start) - (o_end - o_start))
+    if held[0] is not None:
+        held[0][0] = old_states[0]
+    j = e = 0   # read up to boundary j of the new file, past the first e edits
+
+    def behind(edit, k):
+        """Whether an edit lies wholly before boundary k: its new lines before it, or, when it only deletes, at it."""
+        return edit[3] <= k and (edit[2] < k or edit[2] == edit[3])
+
+    def copy(start, end, by):   # lines unchanged, read as they were
+        if end > start:
+            kinds[start:end] = old_kinds[start - by:end - by]
+            if old_states is not None:
+                held[0][start + 1:end + 1] = old_states[start + 1 - by:end + 1 - by]
+
+    while e < m:
+        n_start = edits[e][2]
+        b = n_start   # the last boundary before the edit, and not before j, where a reading can start
+        while b > j and state_at(old_states, b - shift[e]) == UNREAD:
+            b -= 1
+        copy(j, b, shift[e])
+        passed = [e]
+
+        def agrees(k, state):
+            """Whether boundary k is past the edits begun and outside every edit, with the old reading's state."""
+            while passed[0] < m and behind(edits[passed[0]], k):
+                passed[0] += 1
+            if passed[0] == e or (passed[0] < m and edits[passed[0]][2] < k):
+                return False
+            back = k - shift[passed[0]]
+            return state != UNREAD and 0 <= back <= old_n and state_at(old_states, back) == state
+
+        start = state_at(held[0], b)
+        if agrees(b, start):   # an edit that only deletes, and leaves the reading as it was
+            j, e = b, passed[0]
+            continue
+        got, got_states, k = reader.session(get, n, eol, b, start, agrees)
+        kinds[b:k] = bytes(got)
+        if held[0] is None and any(x is not None for x in got_states):
+            held[0] = [None] * (n + 1)
+        if held[0] is not None:
+            held[0][b + 1:k + 1] = got_states
+        j, e = k, (passed[0] if k < n else m)
+    copy(j, n, shift[m])
+    return bytes(kinds), held[0]
+
+
+GEN_LINES, GEN_HTML_LINES = 5, 40
+# Generated files, known as GitHub's Linguist knows them, by what their first lines say rather than by their name:
+# a comment that opens with a generator's mark within the first GEN_LINES lines ("// Code generated by sqlc. DO NOT
+# EDIT.", "// <auto-generated />", "# Generated by Django 4.2", "# This file is auto-generated from the current state
+# of the database", "/*! tailwindcss v3"), an HTML page whose first GEN_HTML_LINES lines name its generator (Hugo,
+# Jekyll, Hexo, MkDocs, Javadoc, Doxygen), which with enough such pages makes every HTML, CSS and JavaScript file in
+# their folder and below the site's output (generated_output), and a .ts file that is Qt Linguist's XML. A file that
+# only mentions such words is not one, and neither is one whose comment only says not to edit something: "do not
+# edit" marks a file only beside a word of generating.
+SITE_PAGES, ROOT_SITE_PAGES = 3, 10
+GEN_OPENERS = ("//", "#", "/*", "*", "--", ";", "<!--", "%", "{-", "(*", "<")
+GENERATED = re.compile(r"(?:code generated|generated by|this (?:file|code) (?:is|was|has been) (?:auto-?|automatically "
+                       r")?generated|this is (?:auto-?|code )?generated|auto-?generated|automatically generated|"
+                       r"@generated|do not edit\b.*\bgenerat\w*|tailwindcss v\d)\b", re.I)
+GENERATOR = re.compile(r"<meta\s[^>]*name=[\"']?generator\b|<!--\s*generated by\b", re.I)
+WEB_OUTPUT = {"HTML", "CSS", "JavaScript"}
+
+
+def generated_line(text, lang, n):
+    """Whether line n, counted from 1, of a file in lang marks the whole file as generated (see GENERATED)."""
+    s = text.lstrip().lstrip("﻿")
+    if n <= GEN_LINES and s.startswith(GEN_OPENERS) and GENERATED.match(s.lstrip("/#*;!<{%(- \t")):
+        return True
+    if lang == "HTML" and n <= GEN_HTML_LINES and GENERATOR.search(s):
+        return True
+    return lang == "TypeScript" and n == 1 and s.startswith(("<?xml", "<!DOCTYPE TS", "<TS "))
+
+
+def generated_head(get, n, lang):
+    """Whether a file's first lines mark it as generated (generated_line)."""
+    return any(generated_line(get(i), lang, i + 1) for i in range(min(n, GEN_HTML_LINES)))
+
+
+def generated_output(paths, marked):
+    """The paths among paths that are generated: those marked (a generator's mark in their first lines), and every
+    HTML, CSS or JavaScript file of a generated site: under the deepest folder holding all the marked HTML pages that
+    share a top-level folder, when there are at least SITE_PAGES of them (docs/ for docs/index.html, docs/404.html and
+    docs/posts/a/index.html), or anywhere, when at least ROOT_SITE_PAGES marked pages include one at the top level (a
+    site built into the root of owner.github.io). A page or two naming a generator, as a hand-written page copied from
+    a template can, marks only itself, never the owner's scripts and styles beside it."""
+    groups, pages = {}, 0
+    for p in marked:
+        if language_of(p) == "HTML":
+            pages += 1
+            folders = os.path.dirname(p).split("/") if "/" in p else []
+            groups.setdefault(folders[0] if folders else "", []).append(folders)
+    sites = {"/".join(os.path.commonprefix(folders)) for top, folders in groups.items()
+             if top and len(folders) >= SITE_PAGES}
+    if "" in groups and pages >= ROOT_SITE_PAGES:
+        sites.add("")
+    inside = lambda p: any(not s or p.startswith(s + "/") for s in sites)   # noqa: E731
+    return {p for p in paths if p in marked or (sites and language_of(p) in WEB_OUTPUT and inside(p))}
+
+
+def text_of(data):
+    """A blob's text: UTF-16 or UTF-32 by its byte order mark (as Windows tools save PowerShell and resource
+    scripts), else UTF-8, unless it holds a null byte in its first 8,000 bytes, which is how git tells a binary
+    file; None for a binary file."""
+    if data.startswith((b"\xff\xfe\x00\x00", b"\x00\x00\xfe\xff")):
+        return data.decode("utf-32", "replace")
+    if data.startswith((b"\xff\xfe", b"\xfe\xff")):
+        return data.decode("utf-16", "replace")
+    if b"\x00" in data[:8000]:
+        return None
+    return data.decode("utf-8", "replace")
+
+
+def split_lines(data, sep):
+    """A file's lines, as git counts them, and whether it ends with a newline."""
+    lines = data.split(sep)
+    if lines[-1]:
+        return lines, False
+    lines.pop()
+    return lines, bool(lines)
+
+
 # Test code, by where it lives: a folder of tests anywhere in the path, or a file named as one (test_x.py,
 # x_test.go, x.test.ts, XTest.java, and this project's own xTEST.py); Rust's #[cfg(test)] modules are found
 # inside the files at the head.
@@ -953,31 +2126,6 @@ TEST_DIRS = {"test", "tests", "__tests__", "spec", "specs", "testing", "e2e", "i
              "fixtures", "test_utils", "testutils", "benches", "benchmarks"}
 TEST_WORD = re.compile(r"^(?:x|rs|py|js|ts|go|e2e|unit|int|smoke)?tests?$|^specs?$", re.I)
 CAMEL_TEST = re.compile(r"[a-z0-9](?:Test|Tests|Spec|IT)\.[A-Za-z]+$")
-
-
-class LineKinds:
-    """Reads consecutive lines of one language as code, comment or blank, following block comments from one
-    line to the next. Over a whole file this is exact as far as line-level syntax goes; over a hunk of added
-    lines, a hunk that starts inside a comment opened above it is read as code."""
-
-    def __init__(self, lang):
-        self.prefixes, self.blocks = COMMENTS.get(lang, ((), ()))
-        self.inside = None
-
-    def kind(self, line):
-        s = line.strip()
-        if not s:
-            return "blank"
-        if self.inside:
-            if self.inside in s:
-                self.inside = None
-            return "comment"
-        for start, end in self.blocks:
-            if s.startswith(start):
-                if end not in s[len(start):]:
-                    self.inside = end
-                return "comment"
-        return "comment" if s.lower().startswith(self.prefixes) else "code"
 
 
 def is_test(path):
@@ -1044,74 +2192,580 @@ def git_lines(args, handle, feed=None):
         raise RuntimeError("git exited %d, or ran past its %d seconds" % (code, seconds))
 
 
+class CatFile:
+    """git cat-file --batch kept open on one repository, for the file versions a reading needs whole: one reached
+    only through a merge, or one no longer held (see Versions). Under the run's deadline like any git command."""
+
+    def __init__(self, repo_dir):
+        self.repo_dir, self.proc, self.timer, self.failed = repo_dir, None, None, False
+
+    def get(self, blob):
+        """blob's content, or None when git cannot give it."""
+        if self.failed:
+            return None
+        try:
+            if self.proc is None:
+                seconds = limit()
+                self.proc = subprocess.Popen(["git", "-C", self.repo_dir, "cat-file", "--batch"],
+                                             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+                self.timer = threading.Timer(seconds, self.proc.kill)
+                self.timer.daemon = True
+                self.timer.start()
+            self.proc.stdin.write(blob.encode("ascii") + b"\n")
+            self.proc.stdin.flush()
+            header = self.proc.stdout.readline().split()
+            if len(header) < 2:
+                self.failed = True
+                return None
+            if len(header) < 3 or header[1] != b"blob":
+                return None
+            size = int(header[2])
+            body = self.proc.stdout.read(size)
+            self.proc.stdout.read(1)
+            if len(body) != size:
+                self.failed = True
+                return None
+            return body
+        except (OSError, ValueError, RuntimeError):
+            self.failed = True
+            return None
+
+    def close(self):
+        if self.timer:
+            self.timer.cancel()
+        if self.proc:
+            for pipe in (self.proc.stdin, self.proc.stdout):
+                try:
+                    pipe.close()
+                except OSError:
+                    pass
+            if self.proc.poll() is None:
+                self.proc.kill()
+            self.proc.wait()
+
+
+class Version:
+    """A file version's lines, as bytes, whether it ends with a newline, and its readings by reader key: (kinds,
+    states, whether exact)."""
+    __slots__ = ("lines", "eol", "readings")
+
+    def __init__(self, lines, eol):
+        self.lines, self.eol, self.readings = lines, eol, {}
+
+    def text(self):
+        """A function giving line i as text, decoded when asked, as git's diffs are read line by line."""
+        lines = self.lines
+        return lambda i: lines[i].decode("utf-8", "replace")
+
+
+VERSION_LINES = 3000000   # the lines of file versions held at once while reading a repository's history
+
+
+class Versions:
+    """The file versions of one repository read so far, the least recently used let go once more than
+    VERSION_LINES lines are held, and git to fetch any other whole (CatFile)."""
+
+    def __init__(self, repo_dir):
+        self.held, self.count, self.cat = {}, 0, CatFile(repo_dir)
+
+    def get(self, blob):
+        """The version blob names, held or fetched, or None when git cannot give it or it is binary."""
+        version = self.held.pop(blob, None)
+        if version is None:
+            data = self.cat.get(blob)
+            if data is None or b"\x00" in data[:8000]:
+                return None
+            version = Version(*split_lines(data, b"\n"))
+            self.count += len(version.lines)
+        self.held[blob] = version
+        self.trim()
+        return version
+
+    def put(self, blob, version):
+        old = self.held.pop(blob, None)
+        self.count += len(version.lines) - (len(old.lines) if old else 0)
+        self.held[blob] = version
+        self.trim()
+
+    def trim(self):
+        while self.count > VERSION_LINES and len(self.held) > 1:
+            blob = next(iter(self.held))
+            self.count -= len(self.held.pop(blob).lines)
+
+
+def reading_of(version, reader, key):
+    """version's reading by reader (cached under key): (kinds, states, exact)."""
+    got = version.readings.get(key)
+    if got is None:
+        got = version.readings[key] = read_lines(reader, version.text(), len(version.lines), version.eol)
+    return got
+
+
+def blob_id(lines, eol, like):
+    """The git object name of a file of these lines, in the hash of the object name like (SHA-1 or SHA-256)."""
+    data = b"\n".join(lines) + (b"\n" if eol else b"")
+    h = hashlib.sha256() if len(like) == 64 else hashlib.sha1()
+    h.update(b"blob %d\x00" % len(data))
+    h.update(data)
+    return h.hexdigest()
+
+
+def applied(old, hunks):
+    """The file an old version and a diff's hunks make, as (lines, ends with a newline), and the edits in it
+    [(old start, old end, new start, new end)], or None when the hunks do not fit the old version."""
+    lines, edits, o = [], [], 0
+    no_newline = None   # when the new file's last line is a hunk's, whether git said it has no newline
+    for old_start, old_count, new_start, new_count, minus, plus, _, plus_no_newline in hunks:
+        a = old_start - 1 if old_count else old_start
+        if a < o or a + old_count > len(old.lines) or old.lines[a:a + old_count] != minus or len(plus) != new_count:
+            return None
+        lines.extend(old.lines[o:a])
+        edits.append((a, a + old_count, len(lines), len(lines) + len(plus)))
+        lines.extend(plus)
+        o = a + old_count
+        no_newline = plus_no_newline if plus and o >= len(old.lines) else None
+    lines.extend(old.lines[o:])
+    if not lines:
+        eol = False
+    elif o < len(old.lines):   # the last line is the old file's own last line
+        eol = old.eol
+    elif no_newline is not None:
+        eol = not no_newline
+    else:   # the old file's last lines gone: the new last line had a newline after it
+        eol = True
+    return lines, eol, edits
+
+
+def line_edits(old_lines, new_lines, repo_dir=None):
+    """The edits that make one list of lines another, as git would diff them: git diff --no-index on the two as
+    files, or difflib where that cannot run."""
+    if repo_dir is not None:
+        folder = tempfile.mkdtemp(prefix="cp-")
+        try:
+            paths = []
+            for name, lines in (("a", old_lines), ("b", new_lines)):
+                paths.append(os.path.join(folder, name))
+                with open(paths[-1], "wb") as f:
+                    f.write("".join(line + "\n" for line in lines).encode("utf-8", "surrogatepass"))
+            p = subprocess.run(["git", "diff", "--no-index", "--no-color", "-U0", "--no-ext-diff", "--no-textconv",
+                                paths[0], paths[1]], capture_output=True, timeout=min(60, limit()))
+            if p.returncode in (0, 1):
+                edits = []
+                for m in re.finditer(rb"(?m)^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@", p.stdout):
+                    a, b, c, d = (int(x) if x is not None else 1 for x in m.groups())
+                    a0 = a - 1 if b else a
+                    c0 = c - 1 if d else c
+                    edits.append((a0, a0 + b, c0, c0 + d))
+                return edits
+        except (OSError, subprocess.SubprocessError, RuntimeError):
+            pass
+        finally:
+            shutil.rmtree(folder, ignore_errors=True)
+    edits = []
+    for tag, i1, i2, j1, j2 in difflib.SequenceMatcher(None, old_lines, new_lines, autojunk=False).get_opcodes():
+        if tag != "equal":
+            edits.append((i1, i2, j1, j2))
+    return edits
+
+
+HUNK = re.compile(rb"@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@")
+LINKS = {"160000", "120000"}   # a submodule, and a symbolic link, whose blob is its target's path, not code
+APPROXIMATE = "approximate"    # read_added_code's key for the lines each file version adds that rest on a fallback
+GENERATED_VERSION = ((), ())   # what read_added_code holds for a version of a generated file (see generated_output)
+
+
+GIT_VERSION = []
+
+
+def git_version():
+    """The installed git's version as a tuple of numbers, (0,) when it cannot be told."""
+    if not GIT_VERSION:
+        try:
+            found = re.search(r"(\d+)\.(\d+)", run(["git", "version"], timeout=60).decode("ascii", "replace"))
+            GIT_VERSION.append(tuple(int(x) for x in found.groups()) if found else (0,))
+        except RuntimeError:
+            return (0,)
+    return GIT_VERSION[0]
+
+
+def diff_path(text):
+    """A path from a diff's ---/+++ line, without git's quotes, or None for /dev/null."""
+    path = text.strip('"')   # git quotes a name holding a quote or a tab; the ending survives
+    if path == "/dev/null":
+        return None
+    return path[2:] if path.startswith(("a/", "b/")) else path
+
+
 def read_added_code(repo_dir):
-    """The lines of code each file version adds and removes, read from its commit's diff with no context, so
-    what a commit adds is exactly its added lines: {(commit, blob): (array of the added lines' line_hash, array
-    of the removed lines')}. A comment or blank line is left out; so are files that are not code (NOT_CODE)."""
-    added = {}
-    state = {"sha": None, "blob": None, "lang": None, "header": False, "reader": None, "old": None,
-             "hashes": None, "removed": None}
+    """The lines of code each file version adds and removes, from its commit's diff with no context, so what a
+    commit adds is exactly its added lines: {(commit, blob): (array of the added lines' line_hash, array of the
+    removed lines')}. A comment or blank line is left out; so are files that are not code (counts_as_code), and
+    every version of a file that any version shows to be generated (generated_output).
+
+    Each line is read as the whole file version reads it, not as its diff alone would show it: the diff's hunks are
+    applied to the version before (held from reading it, or fetched with cat-file), the result checked against the
+    new version's object name, and the new version read from its reading of the old one (read_edited), so a line
+    added inside a comment or string opened above its hunk reads as it does at the head. Where no version before
+    can be had and the new one cannot be fetched either, each hunk is read alone and its lines are counted under
+    APPROXIMATE ({(commit, blob): lines}), as are lines of a Python version its tokenizer could not read. A version
+    git calls binary is read whole when its text can be decoded (UTF-16, as Windows tools save scripts), diffed
+    line for line against the version before."""
+    added, where, marked, approximate = {}, {}, set(), {}
+    added[APPROXIMATE] = approximate
+    versions = Versions(repo_dir)
+    state = {"sha": None, "merge": False, "file": None, "header": False, "hunk": None, "side": None}
 
     def finish():
-        if state["hashes"] is not None:
-            added[(state["sha"], state["blob"])] = (state["hashes"], state["removed"])
-        state["hashes"] = state["removed"] = None
+        f = state["file"]
+        state["file"] = None
+        if f is None or f["new_blob"] is None or f["mode"] in LINKS or not f["new_path"]:
+            return
+        path = f["new_path"]
+        lang = language_of(path)
+        if not counts_as_code(path, lang):
+            return
+        if state["merge"]:
+            hold(f, lang)
+            return
+        key = (state["sha"], f["new_blob"])
+        got = version_lines(f, lang)
+        if got is None:
+            return
+        plus, minus, rough, head = got
+        added[key] = (plus, minus)
+        where[key] = path
+        if rough:
+            approximate[key] = rough
+        if head:
+            marked.add(path)
+
+    def hold(f, lang):
+        """A merge's version of a file, made from its first parent's as a commit's is, so a commit after the merge
+        finds it at hand; a merge adds no lines of its own (its branch's were counted where they were written).
+        Only a version the merge made from one at hand is kept: any other is fetched if a later commit needs it."""
+        reader, rkey = reader_for(lang, f["new_path"])
+        have = versions.held.get(f["new_blob"])
+        if have is not None and rkey in have.readings or f["binary"]:
+            return
+        old = versions.held.get(f["old_blob"]) if f["old_blob"] and f["old_blob"].strip("0") else None
+        made = applied(old, f["hunks"]) if old is not None else None
+        base = old.readings.get(rkey) if old is not None else None
+        if made is None or base is None or not base[2] or blob_id(made[0], made[1], f["new_blob"]) != f["new_blob"]:
+            return
+        new = Version(made[0], made[1])
+        try:
+            new.readings[rkey] = read_edited(reader, base[:2], new.text(), len(new.lines), new.eol, made[2]) + (True,)
+        except ReadFailed:
+            return
+        versions.put(f["new_blob"], new)
+
+    def version_lines(f, lang):
+        """(added lines' hashes, removed lines', how many added lines rest on a fallback, whether generated)."""
+        reader, rkey = reader_for(lang, f["new_path"])
+        old_path = f["old_path"] or f["new_path"]
+        old_lang = language_of(old_path) or lang
+        old_reader, okey = reader_for(old_lang, old_path) if old_path != f["new_path"] else (reader, rkey)
+        blank_old = not f["old_blob"] or not f["old_blob"].strip("0")
+        if f["binary"]:
+            return binary_lines(f, lang, reader, rkey, old_reader, okey, blank_old)
+        old = Version([], False) if blank_old else versions.get(f["old_blob"])
+        made = applied(old, f["hunks"]) if old is not None else None
+        if made is not None and blob_id(made[0], made[1], f["new_blob"]) != f["new_blob"]:
+            made = None
+        if made is None:
+            data = versions.cat.get(f["new_blob"])
+            if data is None or b"\x00" in data[:8000]:
+                return hunk_lines(f, reader, old_reader)
+            new = Version(*split_lines(data, b"\n"))
+            edits = None
+        else:
+            new, edits = Version(made[0], made[1]), made[2]
+        get, n = new.text(), len(new.lines)
+        if edits is not None:
+            base = old.readings.get(rkey) or reading_of(old, reader, rkey)
+            if base[2]:   # read from the old version's reading, where that was the exact reader's
+                try:
+                    kinds, states = read_edited(reader, base[:2], get, n, new.eol, edits)
+                    new.readings[rkey] = (kinds, states, True)
+                except ReadFailed:
+                    pass
+        kinds, _, exact = reading_of(new, reader, rkey)
+        versions.put(f["new_blob"], new)
+        plus, minus, rough = array("q"), array("q"), 0
+        old_kinds = old_get = None
+        for h, (a, b, c, d) in zip(f["hunks"], edits or ()):
+            first = c
+            if h[6] and h[4] and h[5] and h[5][0].rstrip(b"\r") == h[4][-1].rstrip(b"\r"):
+                first, b = c + 1, b - 1   # the old last line only gained its line end: not removed, not written
+            for i in range(first, d):
+                if kinds[i] == CODE:
+                    plus.append(line_hash(get(i)))
+                    rough += not exact
+            if b > a:
+                if old_kinds is None:
+                    old_get, old_kinds = old.text(), reading_of(old, old_reader, okey)[0]
+                for i in range(a, b):
+                    if old_kinds[i] == CODE:
+                        minus.append(line_hash(old_get(i)))
+        if edits is None:   # the new version read whole, as fetched: its added lines are the hunks' own
+            for old_start, old_count, new_start, new_count, gone, came, _, _ in f["hunks"]:
+                c = new_start - 1 if new_count else new_start
+                for i in range(c, min(c + new_count, n)):
+                    if kinds[i] == CODE:
+                        plus.append(line_hash(get(i)))
+                        rough += not exact
+                reader_old = old_reader.fallback or old_reader
+                st = reader_old.initial if old_start <= 1 else reader_old.middle
+                for line in gone:
+                    text = line.decode("utf-8", "replace")
+                    kind, st = reader_old.read(text, st)
+                    if kind == CODE:
+                        minus.append(line_hash(text))
+        # a version's first lines are read for a generator's mark unless they are the version before's, at its path
+        fresh_head = edits is None or blank_old or old_path != f["new_path"] or any(c < GEN_HTML_LINES
+                                                                                    for a, b, c, d in edits)
+        return plus, minus, rough, fresh_head and generated_head(get, n, lang)
+
+    def hunk_lines(f, reader, old_reader):
+        """Each hunk read alone, from where a file starts when the hunk does and from plain code otherwise: the
+        approximation when no whole version can be had."""
+        plus, minus, rough, head = array("q"), array("q"), 0, False
+        lang = language_of(f["new_path"])
+        for old_start, old_count, new_start, new_count, gone, came, _, _ in f["hunks"]:
+            for lines, start, into, rd in ((came, new_start, plus, reader), (gone, old_start, minus, old_reader)):
+                rd = rd.fallback or rd
+                st = rd.initial if start <= 1 else rd.middle
+                for n, line in enumerate(lines, start):
+                    text = line.decode("utf-8", "replace")
+                    kind, st = rd.read(text, st)
+                    if kind == CODE:
+                        into.append(line_hash(text))
+                        if into is plus:
+                            rough += 1
+                    if into is plus and n <= GEN_HTML_LINES and generated_line(text, lang, n):
+                        head = True
+        return plus, minus, rough, head
+
+    def binary_lines(f, lang, reader, rkey, old_reader, okey, blank_old):
+        """A version git calls binary, read as text when it decodes as text (text_of)."""
+        data = versions.cat.get(f["new_blob"])
+        new_text = text_of(data) if data is not None else None
+        if new_text is None:
+            return None
+        old_data = b"" if blank_old else versions.cat.get(f["old_blob"])
+        old_text = (text_of(old_data) if old_data is not None else None) or ""
+        new_lines, new_eol = split_lines(new_text, "\n") if new_text else ([], False)
+        old_lines, old_eol = split_lines(old_text, "\n") if old_text else ([], False)
+        kinds, _, exact = read_lines(reader, new_lines.__getitem__, len(new_lines), new_eol)
+        old_kinds = read_lines(old_reader, old_lines.__getitem__, len(old_lines), old_eol)[0] if old_lines else b""
+        plus, minus, rough = array("q"), array("q"), 0
+        for a, b, c, d in line_edits(old_lines, new_lines, repo_dir):
+            for i in range(c, d):
+                if kinds[i] == CODE:
+                    plus.append(line_hash(new_lines[i]))
+                    rough += not exact
+            for i in range(a, b):
+                if old_kinds[i] == CODE:
+                    minus.append(line_hash(old_lines[i]))
+        return plus, minus, rough, generated_head(new_lines.__getitem__, len(new_lines), lang)
 
     def handle(stream):
         s = state
         for raw in stream:
-            line = raw.decode("utf-8", "replace").rstrip("\n")
-            if line.startswith("\x00"):
+            if raw.startswith(b"\x00"):
                 finish()
-                s.update(sha=line[1:].strip(), header=False, blob=None, lang=None)
-            elif line.startswith("diff --git "):
-                finish()
-                s.update(header=True, blob=None, lang=None)
-            elif s["header"]:
-                if line.startswith("index "):
-                    ids = line[6:].split(" ")[0].split("..")
-                    s["blob"] = ids[1] if len(ids) == 2 and re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", ids[1]) else None
-                elif line.startswith("+++ "):
-                    path = line[4:].strip('"')   # git quotes a name holding a quote or a tab; the ending survives
-                    path = None if path == "/dev/null" else path[2:] if path.startswith("b/") else path
-                    lang = language_of(path) if path else None
-                    s["lang"] = lang if lang and lang not in NOT_CODE else None
-                elif line.startswith("@@"):
-                    s.update(header=False, reader=LineKinds(s["lang"]), old=LineKinds(s["lang"]))
-                    if s["blob"] and s["lang"]:
-                        s.update(hashes=array("q"), removed=array("q"))
-            elif line.startswith("@@"):   # a new hunk: whatever the last one left open is unknown
-                s.update(reader=LineKinds(s["lang"]), old=LineKinds(s["lang"]))
-            elif s["hashes"] is None:
+                ids = raw[1:].decode("ascii", "replace").split()   # the commit, then its parents
+                s.update(sha=ids[0] if ids else None, merge=len(ids) > 2, header=False)
                 continue
-            elif line.startswith("+") and s["reader"].kind(line[1:]) == "code":
-                s["hashes"].append(line_hash(line[1:]))
-            elif line.startswith("-") and s["old"].kind(line[1:]) == "code":
-                s["removed"].append(line_hash(line[1:]))
+            if raw.startswith(b"diff --git "):
+                finish()
+                s.update(header=True, hunk=None, side=None,
+                         file={"old_blob": None, "new_blob": None, "old_path": None, "new_path": None, "mode": None,
+                               "binary": False, "hunks": []})
+                continue
+            f = s["file"]
+            if f is None:
+                continue
+            if s["header"]:
+                if raw.startswith(b"@@"):
+                    s["header"] = False
+                else:
+                    line = raw.decode("utf-8", "replace").rstrip("\n")
+                    if line.startswith("index "):
+                        fields = line[6:].split(" ")
+                        ids = fields[0].split("..")
+                        if len(ids) == 2 and all(re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", x) for x in ids):
+                            f["old_blob"], f["new_blob"] = ids
+                        if len(fields) > 1:
+                            f["mode"] = fields[1]
+                    elif line.startswith(("new file mode ", "new mode ")):
+                        f["mode"] = line.split()[-1]
+                    elif line.startswith("--- "):
+                        f["old_path"] = diff_path(line[4:])
+                    elif line.startswith("+++ "):
+                        f["new_path"] = diff_path(line[4:])
+                    elif line.startswith("Binary files "):
+                        f["binary"] = True
+                        if f["new_path"] is None:   # git names the paths only here: "Binary files a/x and b/y differ"
+                            m = re.match(r"Binary files (.*) and (.*) differ$", line)
+                            if m:
+                                f["old_path"], f["new_path"] = diff_path(m.group(1)), diff_path(m.group(2))
+                    continue
+            if raw.startswith(b"@@"):
+                m = HUNK.match(raw)
+                if m:
+                    a, b, c, d = (int(x) if x is not None else 1 for x in m.groups())
+                    s["hunk"] = [a, b, c, d, [], [], False, False]
+                    f["hunks"].append(s["hunk"])
+                s["side"] = None
+            elif s["hunk"] is not None:
+                body = raw[1:-1] if raw.endswith(b"\n") else raw[1:]
+                if raw.startswith(b"+"):
+                    s["hunk"][5].append(body)
+                    s["side"] = 7
+                elif raw.startswith(b"-"):
+                    s["hunk"][4].append(body)
+                    s["side"] = 6
+                elif raw.startswith(b"\\") and s["side"]:   # "\ No newline at end of file", of the line before it
+                    s["hunk"][s["side"]] = True
         finish()
 
     # --no-textconv: a text conversion (Git for Windows ships one for PDF and Word files) starts a program for
-    # every version of every such file, and what it prints is not what the file holds
-    git_lines(["git", "-C", repo_dir, "-c", "core.quotepath=off", "log", "--exclude=refs/heads/gh-pages", "--all",
-               "--no-merges", "-M", "-p", "-U0", "--full-index", "--no-color", "--no-ext-diff", "--no-textconv",
-               "--format=%x00%H"], handle)
+    # every version of every such file, and what it prints is not what the file holds. --reverse --topo-order:
+    # every version is read after the one before it, so its reading is at hand. Merges come with their diffs from
+    # their first parents (git 2.31 and later), only to make their versions (see hold); an older git leaves them out.
+    merges = ["--diff-merges=first-parent"] if git_version() >= (2, 31) else ["--no-merges"]
+    try:
+        git_lines(["git", "-C", repo_dir, "-c", "core.quotepath=off", "log", "--exclude=refs/heads/gh-pages", "--all"]
+                  + merges + ["--reverse", "--topo-order", "-M", "-p", "-U0", "--full-index", "--no-color",
+                              "--no-ext-diff", "--no-textconv", "--format=%x00%H %P"], handle)
+    finally:
+        versions.cat.close()
+    if marked:
+        output = generated_output(set(where.values()), marked)
+        for key, path in where.items():
+            if path in output:
+                added[key] = GENERATED_VERSION
+                approximate.pop(key, None)
     return added
 
 
+LINGUIST = ("linguist-vendored", "linguist-generated", "linguist-documentation")
+
+
+def attributed(repo_dir, source, paths):
+    """The paths among paths that the .gitattributes files of the commit source mark linguist-vendored,
+    linguist-generated or linguist-documentation: the owner's own word, which GitHub's language bar also takes, on
+    what is not code they wrote (a path marked false stays counted). None when git cannot say: check-attr's --source
+    needs git 2.40."""
+    paths = sorted(p for p in paths if p)
+    if not paths:
+        return set()
+    found = set()
+
+    def handle(stream):
+        items = stream.read().split(b"\x00")
+        for k in range(0, len(items) - 2, 3):
+            if items[k + 2] in (b"set", b"true"):
+                found.add(items[k].decode("utf-8", "replace"))
+
+    try:
+        git_lines(["git", "-C", repo_dir, "check-attr", "--source=" + source, "-z", "--stdin"] + list(LINGUIST), handle,
+                  feed="".join(p + "\x00" for p in paths).encode("utf-8", "surrogateescape"))
+    except RuntimeError:
+        return None
+    return found
+
+
+def attributed_versions(repo_dir, commits):
+    """The file versions of commits that the repository's .gitattributes files mark as not the owner's code (see
+    attributed), each judged by the attributes its own commit held: {(commit, path)}, or None when git cannot say.
+    A commit holds the attributes of the last commit before it, along its first parents, that changed a .gitattributes
+    file; commits of a repository whose .gitattributes never mention linguist attributes are read no further."""
+    try:
+        blobs = run(["git", "-C", repo_dir, "log", "--all", "--format=", "--raw", "--no-renames", "--no-abbrev",
+                     "--", ":(glob)**/.gitattributes"], timeout=limit()).decode("utf-8", "replace")
+    except RuntimeError:
+        return None
+    ids = sorted({line.split()[3] for line in blobs.splitlines() if line.startswith(":") and len(line.split()) > 4}
+                 - {"0" * 40, "0" * 64})
+    if not ids:
+        return set()
+    mentioned = [False]
+
+    def look(stream):
+        body = stream.read()
+        mentioned[0] = b"linguist-" in body
+
+    try:
+        git_lines(["git", "-C", repo_dir, "cat-file", "--batch"], look, feed="".join(i + "\n" for i in ids).encode())
+        if not mentioned[0]:
+            return set()
+        listing = run(["git", "-C", repo_dir, "rev-list", "--all", "--topo-order", "--reverse", "--parents"],
+                      timeout=limit()).decode("ascii", "replace").split("\n")
+        feed = "".join(line.split()[0] + (" " + line.split()[1] if len(line.split()) > 1 else "") + "\n"
+                       for line in listing if line.strip())
+        changed = set()
+
+        def touched(stream):
+            for raw in stream:
+                text = raw.decode("utf-8", "replace").strip()
+                if re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", text):
+                    changed.add(text)
+
+        git_lines(["git", "-C", repo_dir, "diff-tree", "--stdin", "--root", "-r", "--name-only", "--",
+                   ":(glob)**/.gitattributes"], touched, feed=feed.encode())
+    except RuntimeError:
+        return None
+    source = {}
+    for line in listing:
+        parts = line.split()
+        if parts:
+            source[parts[0]] = parts[0] if parts[0] in changed else source.get(parts[1]) if len(parts) > 1 else None
+    wanted = {}
+    for c in commits:
+        s = source.get(c.sha)
+        if s:
+            wanted.setdefault(s, set()).update(f.path for f in c.files)
+    marked = set()
+    by_source = {}
+    for s, paths in wanted.items():
+        got = attributed(repo_dir, s, paths)
+        if got is None:
+            return None
+        by_source[s] = got
+    for c in commits:
+        got = by_source.get(source.get(c.sha))
+        if got:
+            marked.update((c.sha, f.path) for f in c.files if f.path in got)
+    return marked
+
+
 def read_head_code(repo_dir):
-    """The lines of code on the default branch as it stands, read whole file by whole file: a Counter of
-    (line_hash, whether it is test code). A Rust #[cfg(test)] module counts as test code, wherever its file is."""
+    """The lines of code on the default branch as it stands, read whole file by whole file with the readers the
+    history is read with, so a line reads alike in both: a Counter of (line_hash, whether it is test code). A Rust
+    #[cfg(test)] module counts as test code, wherever its file is, its braces counted outside literals and comments.
+    Left out: what counts_as_code leaves out, symbolic links and submodules, generated files (generated_output), and
+    the paths the default branch's .gitattributes marks (attributed). Its attribute approximate counts the lines, of
+    each key, read by a fallback (a Python file its tokenizer could not read); its attribute unattributed is True
+    when .gitattributes could not be read."""
     listing = run(["git", "-C", repo_dir, "ls-tree", "-r", "-z", "--full-tree", "HEAD"]).decode("utf-8", "replace")
     files = []
     for item in listing.split("\x00"):
         meta, _, path = item.partition("\t")
         fields = meta.split()
-        lang = language_of(path) if len(fields) == 3 and fields[1] == "blob" else None
-        if lang and lang not in NOT_CODE:
+        lang = language_of(path) if len(fields) == 3 and fields[1] == "blob" and fields[0] not in LINKS else None
+        if counts_as_code(path, lang):
             files.append((fields[2], path, lang))
-    head = Counter()
+    head, rough = Counter(), Counter()
+    head.approximate, head.unattributed = rough, False
     if not files:
         return head
+    skip = attributed(repo_dir, "HEAD", {p for _, p, _ in files})
+    if skip is None:
+        head.unattributed, skip = True, set()
+    files = [f for f in files if f[1] not in skip]
+    web, marked = {}, set()   # each HTML, CSS and JavaScript file's lines, kept until the sites are known
 
     def handle(stream):
         for blob, path, lang in files:
@@ -1120,26 +2774,58 @@ def read_head_code(repo_dir):
                 continue
             body = stream.read(int(header[2]))
             stream.read(1)
-            if b"\x00" in body[:8000]:
+            text = text_of(body)
+            if text is None:
                 continue
-            test, reader, depth, inside = is_test(path), LineKinds(lang), 0, None
-            for text in body.decode("utf-8", "replace").splitlines():
-                kind = reader.kind(text)
-                in_test = test
-                if lang == "Rust" and not test:
-                    s = text.strip()
-                    if inside is None and s.startswith("#[cfg(test)]"):
-                        inside, s = depth, s[len("#[cfg(test)]"):].strip()
-                    in_test = inside is not None
-                    depth += text.count("{") - text.count("}")
-                    if inside is not None and depth <= inside and ("}" in text or s.endswith(";")):
-                        inside = None   # the module closed, or the attribute was on one item such as a use
-                if kind == "code":
-                    head[(line_hash(text), in_test)] += 1
+            # lines end at \n alone, as in the diffs read_added_code reads, so a line holding a form feed or U+2028
+            # is one line in both and its text matches (splitlines would cut it in two)
+            lines, eol = split_lines(text, "\n")
+            if generated_head(lines.__getitem__, len(lines), lang):
+                marked.add(path)
+                continue
+            into = web.setdefault(path, Counter()) if lang in WEB_OUTPUT else head
+            test = is_test(path)
+            reader = reader_for(lang, path)[0]
+            if lang == "Rust" and not test:
+                kinds, exact = rust_lines(reader, lines, into)
+            else:
+                kinds, _, exact = read_lines(reader, lines.__getitem__, len(lines), eol)
+                for text_line, kind in zip(lines, kinds):
+                    if kind == CODE:
+                        into[(line_hash(text_line), test)] += 1
+            if not exact:
+                for text_line, kind in zip(lines, kinds):
+                    if kind == CODE:
+                        rough[(line_hash(text_line), test)] += 1
 
     git_lines(["git", "-C", repo_dir, "cat-file", "--batch"], handle,
               feed="".join(blob + "\n" for blob, _, _ in files).encode())
+    output = generated_output(set(web), marked) if marked else set()
+    for path, standing in web.items():
+        if path not in output:
+            head.update(standing)
     return head
+
+
+def rust_lines(reader, lines, into):
+    """A Rust file's lines of code into the Counter into, those of a #[cfg(test)] module as test code: the module's
+    extent found by counting its braces outside literals and comments. Returns (kinds, exact)."""
+    kinds, state, depth, inside = bytearray(), reader.initial, 0, None
+    for text in lines:
+        bare = []
+        kind, state = reader.read(text, state, bare)
+        kinds.append(kind)
+        code = "".join(bare)
+        s = code.strip()
+        if inside is None and s.startswith("#[cfg(test)]"):
+            inside, s = depth, s[len("#[cfg(test)]"):].strip()
+        in_test = inside is not None
+        depth += code.count("{") - code.count("}")
+        if inside is not None and depth <= inside and ("}" in code or s.endswith(";")):
+            inside = None   # the module closed, or the attribute was on one item such as a use
+        if kind == CODE:
+            into[(line_hash(text), in_test)] += 1
+    return bytes(kinds), True
 
 
 NO_LINES = ((), ())   # a file version whose diff added and removed no line of code
@@ -1180,9 +2866,17 @@ def collect(owner, repos, work, since=None):
     tag), known by its author's address, author time and subject. File versions another account wrote,
     from the template a repository was made from or from coderprint itself in a relay copy, count as seen
     before anything is read; a commit that adds nothing else is not the owner's work and does not count. A
-    repository that cannot be read, even on a second try, is left out and counted in "unread"."""
+    repository that cannot be read, even on a second try, is left out and counted in "unread". The file versions a
+    repository's .gitattributes marks as vendored, generated or documentation (attributed_versions) count nowhere,
+    and neither do generated files (generated_output).
+
+    code["approximate"] lists (time, lines) for the lines written whose reading rests on a fallback (see
+    read_added_code), numstat's counts for a repository whose diffs cannot be read among them, and
+    code["approximate_in_use"] the lines in use read so; code["attributes_unread"] counts the repositories whose
+    .gitattributes git could not read."""
     all_commits, mismatched, unread, ignore = [], 0, 0, set()
     code, head = {}, {}   # by repository: what each file version adds, and what stands at the head
+    skip, attributes_unread = {}, 0   # by repository: the (commit, path) its .gitattributes marks as not its own
     for i, r in enumerate(repos):
         if r.get("isDisabled") or r.get("isLocked"):
             continue   # counted in the listing, never cloned
@@ -1193,6 +2887,10 @@ def collect(owner, repos, work, since=None):
                 code[i], head[i] = read_added_code(dest), read_head_code(dest)
             except RuntimeError:
                 code[i], head[i] = None, None
+            marked = attributed_versions(dest, commits)
+            if marked is None or getattr(head[i], "unattributed", False):
+                attributes_unread += 1
+            skip[i] = marked or set()
         except RuntimeError:
             unread += 1
             continue
@@ -1210,7 +2908,7 @@ def collect(owner, repos, work, since=None):
     mine = authorship(owner, all_commits, owner_identity(owner), repos)
 
     seen, shas, keys = set(seeded), set(), set()
-    events, commit_times, import_times, import_lines = [], [], [], []
+    events, commit_times, import_times, import_lines, approximate = [], [], [], [], []
     left_out = Counter()
     pool = Counter()   # the lines of code counted as written in the window, by line_hash, in every repository
     holding, writing = set(), set()   # repositories with any file version, and with one not another's
@@ -1234,14 +2932,18 @@ def collect(owner, repos, work, since=None):
             continue
         keys.add(key)
         commit_times.append(c.ts)
-        counted = [f for f in fresh if f.added is not None and language_of(f.path)]
-        brought = c.sha not in ignore and sum(1 for f in counted if f.status == "A") > IMPORT_FILES
+        theirs = skip.get(c.repo) or ()
         added = code.get(c.repo)
+        counted = [f for f in fresh if f.added is not None and language_of(f.path) and (c.sha, f.path) not in theirs]
+        # the import rule counts files of code only: prose, data and generated files are not code (see IMPORT_FILES)
+        code_files = [f for f in counted if counts_as_code(f.path, language_of(f.path))
+                      and (added is None or added.get((c.sha, f.blob)) is not GENERATED_VERSION)]
+        brought = c.sha not in ignore and sum(1 for f in code_files if f.status == "A") > IMPORT_FILES
         in_window = added is not None and (since is None or c.ts >= since)
         if c.sha in ignore or brought:
             if brought:   # an existing codebase brought in, not written
                 import_times.append(c.ts)
-                import_lines.append((c.ts, sum(f.added for f in counted)))
+                import_lines.append((c.ts, sum(f.added for f in code_files)))
             elif in_window:
                 move_credit(pool, added, c.sha, c.files)
             seen.update(f.blob for f in fresh)
@@ -1249,36 +2951,46 @@ def collect(owner, repos, work, since=None):
         swept = sweep(counted)
         if in_window and swept:
             move_credit(pool, added, c.sha, swept)
+        rough = added.get(APPROXIMATE, {}) if added is not None else {}
         for f in fresh:
             if f.blob in seen:
                 continue
             seen.add(f.blob)
             lang = language_of(f.path)
-            if not lang or lang in NOT_CODE or f in swept:
+            if not counts_as_code(f.path, lang) or f in swept or (c.sha, f.path) in theirs:
                 continue
             if added is None:
                 lines = f.added or 0
+                if lines:   # numstat's count, comments and blank lines and all
+                    approximate.append((c.ts, lines))
             else:
                 plus = added.get((c.sha, f.blob), NO_LINES)[0]
                 lines = len(plus)
                 if in_window:
                     pool.update(plus)
+                if rough.get((c.sha, f.blob)):
+                    approximate.append((c.ts, rough[(c.sha, f.blob)]))
             if lines:
                 events.append((c.ts, lang, lines))
     # what still stands: each line of code at a head that matches a written line not already taken
     in_use = [0, 0]   # production, tests
+    rough_in_use = 0   # of them, lines a fallback read
     for i, standing in head.items():
         if standing is None:
             continue
+        loose = getattr(standing, "approximate", {})
         for (h, test), n in standing.items():
             taken = min(n, pool[h])
             if taken:
                 pool[h] -= taken
                 in_use[test] += taken
+                rough_in_use += min(taken, loose.get((h, test), 0))
     return {"events": events, "commits": commit_times, "imports": import_times, "import_lines": import_lines,
             "mismatched": mismatched, "unread": unread, "left_out": dict(left_out),
             "copies": {repos[k]["name"] for k in holding - writing},
-            "code": {"production": in_use[0], "tests": in_use[1], "unread": sum(1 for v in code.values() if v is None)},
+            "code": {"production": in_use[0], "tests": in_use[1], "unread": sum(1 for v in code.values() if v is None),
+                     "approximate": approximate, "approximate_in_use": rough_in_use,
+                     "attributes_unread": attributes_unread},
             "now": dt.datetime.now(dt.timezone.utc).timestamp()}
 
 
@@ -3360,9 +5072,23 @@ DATA_NOTE = ("Machine-readable: the card's figures, what each means and how it w
 DEFINITIONS = {
     "line_of_code": {
         "means": "A line of a source file that is neither blank nor only a comment, judged by the comment syntax of "
-                 "the file's language; a line of code with a comment after it is code.",
-        "leaves_out": "Markdown, TeX, YAML, TOML, plain text and any file whose name or extension no language claims; "
-                      "vendored folders, generated output, lock files and submodules."},
+                 "the file's language; a line of code with a comment after it is code, and so is every line of a "
+                 "string. A Python docstring, or any string standing alone as a statement, is a comment.",
+        "method": "Each file version is read whole, as the language reads it: Python by its own tokenizer, the C "
+                  "family and most others with their strings and character literals followed and nested comments "
+                  "nested. A line added to a file reads as the whole new version reads it, so a line added inside a "
+                  "comment or string opened above it reads alike in written and in use.",
+        "leaves_out": "Markdown, TeX, YAML, TOML, plain text, the prose of a literate source, notebooks, any file "
+                      "whose name or extension no language claims, and one whose extension several languages share "
+                      "and comment differently; vendored folders, a build's output, generated files (by folder, by "
+                      "name, or by a generator's mark in their first lines), lock files, submodules, symbolic links, "
+                      "and the paths a repository's .gitattributes marks linguist-vendored, linguist-generated or "
+                      "linguist-documentation.",
+        "limits": "A few languages whose strings cannot be followed line by line (shell, Perl, Ruby, MATLAB and "
+                  "others) are read by their comment syntax at the start of each line only, so a comment opened "
+                  "after code there counts as code. approximate_loc says how many of a figure's lines rest on a "
+                  "fallback: a Python file its tokenizer could not read, a file version no diff could be read "
+                  "against, or a repository whose diffs could not be read, whose added lines count as they are."},
     "written": {
         "means": "Lines of code the account's owner added in the window, each file version counted once: the first "
                  "time its exact content appears in any of the account's repositories or branches.",
@@ -3447,6 +5173,8 @@ def card_data(owner, window, now, zone, start, S, repos, private, data, stats, s
         by_slice[OTHER if lang in small else lang][min(51, max(0, int((S - age) / S * 52)))] += n
     left = data["left_out"]
     drawn = percents({l: totals[l] / grand for l in names}) if grand else {}
+    loc = data.get("code") or {}
+    rough = sum(n for t, n in loc.get("approximate", ()) if start <= t <= now + FUTURE_SLACK)
     return {
         "schema": SCHEMA,
         "schema_note": "Fields are only ever added within %s; ignore any you do not know. #/definitions says what each "
@@ -3460,13 +5188,15 @@ def card_data(owner, window, now, zone, start, S, repos, private, data, stats, s
                    "definition": "#/definitions/day"},
         "scope": {
             "repositories": {"visible": len(repos), "read": readable - data["unread"], "unread": data["unread"],
-                             "read_without_line_diffs": (data.get("code") or {}).get("unread", 0)},
+                             "read_without_line_diffs": loc.get("unread", 0),
+                             "read_without_gitattributes": loc.get("attributes_unread", 0)},
             "owned_only": True, "forks": "excluded", "visibility": "public and private" if private else "public only",
             "branches": "every branch; gh-pages only when it is the default",
             "authorship": "the owner's own commits (an organization's card counts every member)"},
         "quantity": {
-            "written_loc": figure(written, "lines of code", "measured", "written"),
-            "in_use_loc": figure(use, "lines of code", "measured", "in_use", equals="production_loc + test_loc"),
+            "written_loc": figure(written, "lines of code", "measured", "written", approximate_loc=min(rough, written)),
+            "in_use_loc": figure(use, "lines of code", "measured", "in_use", equals="production_loc + test_loc",
+                                 approximate_loc=min(loc.get("approximate_in_use", 0), use)),
             "production_loc": figure(prod, "lines of code", "measured", "production"),
             "test_loc": figure(tests, "lines of code", "measured", "test"),
             "retained_fraction": figure(round(use / float(written), 4) if written else None, "fraction", "derived",
