@@ -472,7 +472,10 @@ def _():
     def fake_clone(owner, name, dest):
         if os.path.isdir(dest):
             shutil.rmtree(dest)
-        subprocess.run(["git", "clone", "-q", "--bare", src, dest], check=True, capture_output=True, timeout=120)
+        result = subprocess.run(["git", "clone", "-q", "--bare", src, dest], capture_output=True, timeout=120)
+        if result.returncode:
+            raise RuntimeError("git clone fixture failed (%s): %s" %
+                               (name, result.stderr.decode("utf-8", "replace")[:240]))
 
     cp.clone = fake_clone
     cp.resolve_authors = lambda owner, samples: {e: ("someoneelse" if "stranger" in e else None) for e in samples}
