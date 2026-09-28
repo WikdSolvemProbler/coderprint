@@ -4,26 +4,30 @@ Copyright 2026 Peter Shiller. All rights reserved, except as licensed below.
 
 ## What is licensed how
 
-- **The code**, everything in this repository outside the `design` folder and the third-party parts below, is licensed under the PolyForm Noncommercial License 1.0.0 in [LICENSE.md](LICENSE.md), with the additional permissions below.
+- **The code**, everything in this repository outside the `design` folder and the third-party parts below, is licensed under the coderprint Noncommercial License 1.0.0 in [LICENSE.md](LICENSE.md), with the additional permissions below.
 - **The design**, the `design` folder (the themes, the chart's colors and the coderprint wordmark), is licensed only under [design/LICENSE.md](design/LICENSE.md). Without it, the code draws in a plain look of its own.
 - **Third-party parts** keep their own terms, set out at the end of this notice.
 
 ## Why
 
-coderprint is one project. Its code is open to read, run, change and fork for any noncommercial purpose, and its look, its name and its marks belong to it, so a copy has to become something else rather than pass for coderprint. Sprawl is the opposite of integration: the way to change coderprint is to join it.
+coderprint is one project. Its code is open to read, run, change and fork for noncommercial purposes, and its look, its name and its marks belong to it, so a copy has to become something else rather than pass for coderprint. Sprawl is the opposite of integration: the way to change coderprint is to join it.
 
 A coderprint card is its owner's own resume, published by their choice. It is never an instrument for measuring people who have not been told.
 
 ## Additional permissions
 
-These add to LICENSE.md; they take nothing away from it.
+These add to LICENSE.md and are granted on all of its terms, its conditions, Violations and No Liability included; they take nothing away from it. Like every license in it, they never cover running coderprint over people who have not been told (LICENSE.md, People Who Have Not Been Told).
 
 1. **Your own profile.** Anyone may use coderprint to draw a card for their own GitHub profile and publish it there, whatever their work, their employer or their reason, including looking for work. That use is a permitted purpose under LICENSE.md.
-2. **Your own relay.** Anyone may deploy a copy of the relay, the `api` and `lib` folders, to serve the card for their own GitHub profile, and let anyone view the card it serves.
+2. **Your own relay.** Anyone may deploy a copy of coderprint, the `design` folder unchanged included, to serve the relay (the `api` and `lib` folders) for their own GitHub profile, whatever their work, their employer or their reason, let anyone view the card it serves, and replace that copy with a newer unchanged release whenever one is published. That use is a permitted purpose under LICENSE.md.
 
 ## Commercial use
 
-Any other use that is not a permitted purpose under LICENSE.md, for example a company running coderprint or software built from it, needs a commercial license from Peter Shiller, at a price. Ask at peter.shiller@pipeeko.com. No license is ever granted for running coderprint, or anything built from it, over employees', contractors' or candidates' accounts or data without telling each of them first, in writing.
+Any other use that is not a permitted purpose under LICENSE.md, for example a company running coderprint or software built from it, needs a commercial license from Peter Shiller, at a price. Ask at peter.shiller@pipeeko.com. A commercial license is a separate written agreement; where it and LICENSE.md differ, it governs for its licensee. Every commercial license carries the section People Who Have Not Been Told of LICENSE.md unchanged: none is ever granted for running coderprint, or anything built from it, over anyone's accounts, repositories, commits or data without telling each of those people first, in writing.
+
+## Versions
+
+Releases up to and including v1.1.0 (commit 86c226e) were published under the PolyForm Noncommercial License 1.0.0 and stay under it; that license is unchanged by anything here and has no section People Who Have Not Been Told. Every later release is under the coderprint Noncommercial License 1.0.0 in LICENSE.md. Each copy is governed by the LICENSE.md it came with.
 
 ## Contributions
 
@@ -31,7 +35,7 @@ Contributions are accepted under the contributor terms in [CONTRIBUTING.md](CONT
 
 ## Reserved
 
-The name coderprint, the coderprint wordmark and the author's own mark (the watermark in the author's own cards, which he supplies through his own secret, not the `mark` input any installer may use for their own) are not licensed, except as design/LICENSE.md allows for the wordmark. The name and the marks identify coderprint as Peter Shiller's work.
+The name coderprint, the coderprint wordmark and the author's own mark (the watermark in the author's own cards, supplied through the author's own secret, not the `mark` input any installer may use for their own) are not licensed, except as design/LICENSE.md allows for the wordmark. The name and the marks identify coderprint as Peter Shiller's work. You may say, truthfully, that a work is built on or forked from coderprint. You may not name a changed copy coderprint, present its cards as coderprint's, or put the wordmark on anything but cards drawn under design/LICENSE.md.
 
 ## Third-party data
 

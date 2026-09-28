@@ -1,8 +1,7 @@
 Required Notice: Copyright 2026 Peter Shiller (https://github.com/WikdSolvemProbler)
+Required Notice: Additional permissions, reservations and the design license are in NOTICE.md and design/LICENSE.md at https://github.com/WikdSolvemProbler/coderprint
 
-# PolyForm Noncommercial License 1.0.0
-
-<https://polyformproject.org/licenses/noncommercial/1.0.0>
+# coderprint Noncommercial License 1.0.0
 
 ## Acceptance
 
@@ -18,7 +17,7 @@ The licensor grants you an additional copyright license to distribute copies of 
 
 ## Notices
 
-You must ensure that anyone who gets a copy of any part of the software from you also gets a copy of these terms or the URL for them above, as well as copies of any plain-text lines beginning with `Required Notice:` that the licensor provided with the software.  For example:
+You must ensure that anyone who gets a copy of any part of the software from you also gets a copy of these terms, as well as copies of any plain-text lines beginning with `Required Notice:` that the licensor provided with the software.  For example:
 
 > Required Notice: Copyright Yoyodyne, Inc. (http://example.com)
 
@@ -32,7 +31,7 @@ The licensor grants you a patent license for the software that covers patent cla
 
 ## Noncommercial Purposes
 
-Any noncommercial purpose is a permitted purpose.
+Any noncommercial purpose is a permitted purpose, except as [People Who Have Not Been Told](#people-who-have-not-been-told) says.
 
 ## Personal Uses
 
@@ -41,6 +40,10 @@ Personal use for research, experiment, and testing for the benefit of public kno
 ## Noncommercial Organizations
 
 Use by any charitable organization, educational institution, public research organization, public safety or health organization, environmental protection organization, or government institution is use for a permitted purpose regardless of the source of funding or obligations resulting from the funding.
+
+## People Who Have Not Been Told
+
+Whatever any other part of these terms says, no use is for a permitted purpose if it produces, with the software or any change or new work based on it, a card, a measurement or any other output about one or more people other than you, unless each of those people was first told, in a writing sent to them before the software was first run over their work, that it would be and what it would produce about them.  This is so whatever the purpose, evaluating, ranking, monitoring, displaying or recognizing them included, and whether the accounts or repositories it reads are theirs or yours.  It applies to everyone, the organizations under [Noncommercial Organizations](#noncommercial-organizations) included.  An organization's card is output about every person whose work it counts.  Reading other people's commits only to leave them out of your own card produces nothing about them, and viewing a card that someone chose to publish is not running the software over their account.
 
 ## Fair Use
 
@@ -57,6 +60,14 @@ If you make any written claim that the software infringes or contributes to infr
 ## Violations
 
 The first time you are notified in writing that you have violated any of these terms, or done anything with the software not covered by your licenses, your licenses can nonetheless continue if you come into full compliance with these terms, and take practical steps to correct past violations, within 32 days of receiving notice.  Otherwise, all your licenses end immediately.
+
+## Severability
+
+If any part of these terms cannot be enforced, the rest still applies, and your licenses are only as broad as the enforceable parts allow.
+
+## Law
+
+California law governs these terms, without regard to its conflict-of-laws rules.
 
 ## No Liability
 
