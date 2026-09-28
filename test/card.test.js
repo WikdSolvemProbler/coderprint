@@ -15,6 +15,7 @@ import {
   appleErrorSvg,
   appleSvg,
   cardsJson,
+  coderprintJson,
   compactPanelSvg,
   spotifySvg,
 } from './fixtures.js';
@@ -31,8 +32,10 @@ const realFetch = globalThis.fetch;
 const realUsers = process.env.CODERPRINT_USERS;
 let calls;
 
-// Stands in for the upstreams, routing each request by what it asks for.
+// Stands in for the upstreams, routing each request by what it asks for. By default the profile is one
+// drawn before coderprint.json existed: its data file is cards.json.
 function upstream({
+  data = statusOnly(404),
   cards = () => ok(cardsJson()),
   panel = () => ok(PANEL_SVG),
   compact = () => ok(COMPACT_PANEL_SVG),
@@ -43,6 +46,7 @@ function upstream({
   globalThis.fetch = async (url, options) => {
     const href = String(url);
     calls.push({ href, options });
+    if (href === `${RAW}coderprint.json`) return data(options);
     if (href === `${RAW}cards.json`) return cards(options);
     if (href.startsWith(`${RAW}panel-compact-`)) return compact(options);
     if (href.startsWith(`${RAW}panel-`)) return panel(options);
@@ -260,12 +264,31 @@ describe('the card', () => {
     await get(`user=${USER}&mode=light`);
     assert.deepEqual(calls.map((call) => call.href).sort(), [
       `${RAW}cards.json`,
+      `${RAW}coderprint.json`,
       `${RAW}panel-light.svg`,
       spotifyUrl(UID, PALETTE.light.bg),
     ]);
     for (const { options } of calls) {
       assert.equal(options.redirect, 'error');
       assert.ok(options.signal instanceof AbortSignal);
+    }
+  });
+
+  it('reads coderprint.json, and prefers it to a cards.json left beside it', async () => {
+    const own = { light: { ...PALETTE.light, bg: '#fafafa' }, dark: { ...PALETTE.dark, bg: '#101010' } };
+    for (const cards of [statusOnly(404), () => ok(cardsJson())]) {
+      upstream({ data: () => ok(coderprintJson({ palette: own })), cards });
+      const svg = await expectCard(await get(`user=${USER}&mode=dark`));
+      assert.ok(svg.includes(`fill="${own.dark.bg}"`));
+      assert.ok(calls.some((call) => call.href === spotifyUrl(UID, own.dark.bg)));
+    }
+  });
+
+  it('falls back to cards.json when coderprint.json is missing or not usable', async () => {
+    for (const data of [statusOnly(404), networkError, () => ok('<html>not json</html>'), () => ok('[1, 2]')]) {
+      upstream({ data });
+      const svg = await expectCard(await get(`user=${USER}&mode=dark`));
+      assert.ok(svg.includes(`fill="${PALETTE.dark.bg}"`));
     }
   });
 
@@ -356,7 +379,7 @@ describe('the card', () => {
 });
 
 describe('upstream failures', () => {
-  it('answers 502 when cards.json is unavailable or not a JSON object', async () => {
+  it('answers 502 when neither coderprint.json nor cards.json is a usable JSON object', async () => {
     const big = huge(10 * MB);
     const failures = {
       'a 404': statusOnly(404),
@@ -366,9 +389,9 @@ describe('upstream failures', () => {
       'a 10 MB body': big.respond,
     };
     for (const [label, cards] of Object.entries(failures)) {
-      upstream({ cards });
+      upstream({ cards, data: label === 'a 10 MB body' ? statusOnly(404) : cards });
       const text = await expectFailure(await get(`user=${USER}&mode=dark`), 502);
-      assert.match(text, /cards\.json/, label);
+      assert.match(text, /coderprint\.json/, label);
       assert.ok(calls.every((call) => !call.href.startsWith(SPOTIFY)), label);
     }
     assert.ok(big.meter.served < 1 * MB, `pulled ${big.meter.served} bytes`);
@@ -442,6 +465,7 @@ describe('the compact card', () => {
     const svg = await expectCompactCard(await get(`user=${USER}&mode=light&layout=compact`));
     assert.deepEqual(calls.map((call) => call.href).sort(), [
       `${RAW}cards.json`,
+      `${RAW}coderprint.json`,
       `${RAW}panel-compact-light.svg`,
       spotifyUrl(UID, PALETTE.light.bg),
     ]);
@@ -608,7 +632,7 @@ describe('Apple Music', () => {
     await get(`user=${USER}&mode=light`);
     assert.deepEqual(
       calls.map((call) => call.href).sort(),
-      [`${RAW}cards.json`, `${RAW}panel-light.svg`, appleUrl(APPLE_UID, 'light')].sort(),
+      [`${RAW}cards.json`, `${RAW}coderprint.json`, `${RAW}panel-light.svg`, appleUrl(APPLE_UID, 'light')].sort(),
     );
     for (const { options } of calls) {
       assert.equal(options.redirect, 'error');

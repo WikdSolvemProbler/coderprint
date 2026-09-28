@@ -35,6 +35,7 @@ import {
   appleErrorSvg,
   appleSvg,
   cardsJson,
+  coderprintJson,
   compactPanelSvg,
   spotifySvg,
 } from './fixtures.js';
@@ -138,6 +139,17 @@ describe('readCards', () => {
   it('takes a valid palette and uid', () => {
     assert.deepEqual(readCards(cardsJson(), 'dark'), { palette: PALETTE.dark, uid: '1joahg6umn39flaqsl1c3j9n3', apple: null });
     assert.deepEqual(readCards(cardsJson(), 'light').palette, PALETTE.light);
+  });
+
+  it('reads coderprint.json from its presentation, the same as cards.json from its top', () => {
+    assert.deepEqual(readCards(coderprintJson(), 'dark'), readCards(cardsJson(), 'dark'));
+    assert.deepEqual(readCards(coderprintJson(), 'light'), readCards(cardsJson(), 'light'));
+    const hostile = { dark: { ...PALETTE.dark, bg: 'red;}' }, light: PALETTE.light };
+    assert.deepEqual(readCards(coderprintJson({ palette: hostile }), 'dark').palette, DEFAULT_PALETTES.dark);
+    assert.equal(readCards(coderprintJson({ uid: 'abc&evil=1' }), 'dark').uid, null);
+    // a presentation that is not an object is ignored, so the top is read as before
+    assert.deepEqual(readCards(JSON.stringify({ presentation: 'x', palette: PALETTE, spotify: { uid: 'abc' } }), 'dark'),
+      { palette: PALETTE.dark, uid: 'abc', apple: null });
   });
 
   it('keeps only the four palette colors', () => {
