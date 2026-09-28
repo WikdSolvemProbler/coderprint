@@ -8,14 +8,14 @@ additional permissions and the reservations in NOTICE.md; the design in design/ 
 It runs as a GitHub Action in the profile repository (see action.yml), or locally from that
 repository's folder while signed in with gh. It reads with GH_TOKEN, ideally a read-only token from the
 account's own GitHub App, and writes assets/panel-light.svg, assets/panel-dark.svg, their compact
-versions for phones (assets/panel-compact-light.svg and assets/panel-compact-dark.svg), assets/cards.json,
+versions for phones (assets/panel-compact-light.svg and assets/panel-compact-dark.svg), assets/coderprint.json,
 an empty assets/blank.svg when the README block needs one (see Layout), and a marked block in README.md,
 leaving the rest of the README alone. It needs only the Python standard library, gh and git, and no
 outside service ever sees the code.
 
 Privacy: Actions logs on a public repository are public, so this script never prints or writes a
 repository name, a file path, commit text or an email address, and names none of the private repositories itself. The
-panels and assets/cards.json hold aggregates only.
+panels and assets/coderprint.json hold aggregates only.
 
 What counts as a line of code: a line of a programming or markup language's file that is neither blank nor a
 comment (see NOT_CODE and COMMENTS). Prose (Markdown, TeX), data (YAML, TOML) and files no language claims are
@@ -3342,6 +3342,170 @@ def alt_text(window, new_lines, rows):
     return "%s; %s" % (title, desc[desc.index(": ") + 2:].rstrip(".")) if ": " in desc else title
 
 
+# ---------------------------------------------------------------- the card as data
+# assets/coderprint.json says everything the card says, built from the very values the panels are drawn from,
+# with what each figure means, for a reader that is not a person looking at the pictures. Like the panels it
+# holds aggregates only, by whole days: never a repository, a path, a commit's text, an address or a time of
+# day. Within coderprint/1 fields are only ever added, so a reader ignores the ones it does not know.
+SCHEMA = "coderprint/1"
+VERSION = "1.2.1"
+UPSTREAM_URL = "https://github.com/" + UPSTREAM
+DATA_FILE, LEGACY_DATA_FILE = "coderprint.json", "cards.json"
+DATA_URL = None   # the data file's public address, set by main, which the panels name in their metadata
+DATA_NOTE = ("Machine-readable: the card's figures, what each means and how it was counted, schema %s, at %s"
+             % (SCHEMA, "{url}"))
+# What each figure means, once, for every figure that refers to it (#/definitions/<term>). "means" is the
+# definition, "method" how it is counted where that matters, "leaves_out" what it never includes and
+# "limits" what it cannot tell.
+DEFINITIONS = {
+    "line_of_code": {
+        "means": "A line of a source file that is neither blank nor only a comment, judged by the comment syntax of "
+                 "the file's language; a line of code with a comment after it is code.",
+        "leaves_out": "Markdown, TeX, YAML, TOML, plain text and any file whose name or extension no language claims; "
+                      "vendored folders, generated output, lock files and submodules."},
+    "written": {
+        "means": "Lines of code the account's owner added in the window, each file version counted once: the first "
+                 "time its exact content appears in any of the account's repositories or branches.",
+        "method": "Read from each commit's own diff. A line rewritten counts again; deleting a line takes nothing off.",
+        "leaves_out": "Commits by other accounts or by automation; reformatting sweeps and commits listed in "
+                      ".git-blame-ignore-revs; a change landed twice; a commit adding more than 500 new files of code "
+                      "(an existing codebase brought in); files from a template or from a relay copy of coderprint."},
+    "in_use": {
+        "means": "Lines of code standing today at the head of each repository's default branch whose text, spacing "
+                 "aside, matches a line counted as written in the window, each written line matched at most once "
+                 "across all the account's repositories.",
+        "method": "A line the owner's own reformatting sweep changed hands its match to the line the sweep left in its "
+                  "place.",
+        "limits": "Matching is by text, not by history: a line with the same text as one the owner wrote, a lone "
+                  "closing brace above all, can match whoever put it there. Read it as an upper bound on how much "
+                  "of what was written still stands. It says nothing about whether the code is deployed or run."},
+    "production": {"means": "Lines in use that are not test code."},
+    "test": {
+        "means": "Lines in use that are test code: in a folder of tests (such as tests, __tests__, spec or e2e), in a "
+                 "file named as a test (test_x.py, x_test.go, x.test.ts, XTest.java), or in a Rust #[cfg(test)] "
+                 "module.",
+        "limits": "Decided by where a line lives, not by what it does."},
+    "retained_fraction": {
+        "means": "Lines in use divided by lines written: how much of the window's writing the heads still hold.",
+        "limits": "A ratio of two totals, so it carries the limits of both; it is not the share of individual lines "
+                  "that survived."},
+    "commit": {
+        "means": "A commit that is not a merge, on any branch (gh-pages only when it is the default), by the owner: "
+                 "counted once however many repositories hold it, and once when the same change landed twice.",
+        "leaves_out": "Commits by other accounts or by automation, and commits dated in the future."},
+    "active_day": {"means": "A day with at least one counted commit."},
+    "streak": {"means": "A run of consecutive active days. The current streak may end yesterday, since today is not "
+                        "over."},
+    "day": {"means": "A whole calendar day in the owner's own time zone when their public profile shows one, and in "
+                     "UTC otherwise. No time of day is recorded anywhere."},
+    "language": {"means": "The language a file counts toward, from its name or extension alone, named as GitHub "
+                          "Linguist names it. Other gathers every language under 1% of the window's lines of code."},
+    "languages_counted": {"means": "Languages with at least 1% of the window's lines of code, Other not among them."},
+    "slice": {"means": "One of 52 equal parts of the chart's span, oldest first. The span starts on the day of the "
+                       "oldest real work in the window and ends on the day the card was drawn."},
+}
+DATA_PRIVACY = {
+    "contains": "Aggregates over every repository counted, by whole days.",
+    "never_contains": ["source code", "repository names", "file names or paths", "commit messages", "email addresses",
+                       "times of day"],
+}
+
+
+def data_text(card):
+    """The data file's text: indented for a person to read, with each list of numbers, such as a series of 52
+    slices, on one line."""
+    text = json.dumps(card, indent=1, ensure_ascii=False)
+    return re.sub(r"\[\s+(-?\d[\d.]*(?:,\s+-?\d[\d.]*)*)\s+\]",
+                  lambda m: "[" + ", ".join(v.strip() for v in m.group(1).split(",")) + "]", text) + "\n"
+
+
+def figure(value, unit, provenance, term, **more):
+    """One figure of the data file: its value, its unit, whether it is counted from history (measured),
+    computed from other figures (derived) or as drawn (display), and where its meaning is defined."""
+    return dict(value=value, unit=unit, provenance=provenance, definition="#/definitions/" + term, **more)
+
+
+def iso_day(t, zone):
+    """The calendar day holding the time t in zone, as YYYY-MM-DD."""
+    return dt.datetime.fromtimestamp(t, zone).date().isoformat()
+
+
+def card_data(owner, window, now, zone, start, S, repos, private, data, stats, spark, commits, stream, column,
+              presentation):
+    """The data file's content (see SCHEMA), built from the values the panels are drawn from. start: the
+    window's first moment, or -inf for all time; S: the chart's span in days; stats: commits, active days,
+    longest streak, current streak and languages counted, as drawn; presentation: what the relay reads."""
+    written, use, prod, tests, P, U = story_figures()
+    kept, prod_pct, tests_pct = kept_shares(P, U)
+    n_commits, active, longest, current, counted = stats
+    readable = sum(1 for r in repos if not (r.get("isDisabled") or r.get("isLocked")))
+    totals, small = folded(column)
+    grand = float(sum(totals.values()))
+    names = sorted(totals, key=lambda l: (l == OTHER, -totals[l], l))
+    by_slice = {l: [0] * 52 for l in names}
+    for age, lang, n in stream:   # the same slices as the activity bars (see main)
+        by_slice[OTHER if lang in small else lang][min(51, max(0, int((S - age) / S * 52)))] += n
+    left = data["left_out"]
+    drawn = percents({l: totals[l] / grand for l in names}) if grand else {}
+    return {
+        "schema": SCHEMA,
+        "schema_note": "Fields are only ever added within %s; ignore any you do not know. #/definitions says what each "
+                       "term means." % SCHEMA,
+        "generator": {"name": "coderprint", "version": VERSION, "source": UPSTREAM_URL,
+                      "methodology": UPSTREAM_URL + "#how-it-counts"},
+        "as_of": iso_day(now, zone),
+        "account": {"login": owner, "profile": "https://github.com/" + owner},
+        "window": {"id": window, "name": WINDOWS[window][1], "days": WINDOWS[window][2],
+                   "from": iso_day(start, zone) if start != float("-inf") else None, "to": iso_day(now, zone),
+                   "definition": "#/definitions/day"},
+        "scope": {
+            "repositories": {"visible": len(repos), "read": readable - data["unread"], "unread": data["unread"],
+                             "read_without_line_diffs": (data.get("code") or {}).get("unread", 0)},
+            "owned_only": True, "forks": "excluded", "visibility": "public and private" if private else "public only",
+            "branches": "every branch; gh-pages only when it is the default",
+            "authorship": "the owner's own commits (an organization's card counts every member)"},
+        "quantity": {
+            "written_loc": figure(written, "lines of code", "measured", "written"),
+            "in_use_loc": figure(use, "lines of code", "measured", "in_use", equals="production_loc + test_loc"),
+            "production_loc": figure(prod, "lines of code", "measured", "production"),
+            "test_loc": figure(tests, "lines of code", "measured", "test"),
+            "retained_fraction": figure(round(use / float(written), 4) if written else None, "fraction", "derived",
+                                        "retained_fraction", equals="in_use_loc / written_loc"),
+            "as_drawn": {"provenance": "display", "written": fmt(written), "in_use": fmt(use),
+                         "production": fmt(prod), "tests": fmt(tests), "kept_percent": kept,
+                         "production_percent": prod_pct, "test_percent": tests_pct},
+        },
+        "activity": {
+            "commits": figure(n_commits, "commits", "measured", "commit"),
+            "active_days": figure(active, "days", "measured", "active_day"),
+            "longest_streak_days": figure(longest, "days", "measured", "streak"),
+            "current_streak_days": figure(current, "days", "measured", "streak"),
+            "series": {"provenance": "measured", "definition": "#/definitions/slice", "slices": 52,
+                       "from": iso_day(now - S * 86400, zone), "to": iso_day(now, zone), "days": int(round(S)),
+                       "slice_days": round(S / 52, 3),
+                       "loc_written": list(spark), "commits": list(commits)},
+        },
+        "languages": {
+            "counted": figure(counted, "languages", "derived", "languages_counted", minimum_share=FOLD),
+            "share_of_loc": [{"language": l, "loc": totals[l], "share": round(totals[l] / grand, 4),
+                              "as_drawn": drawn.get(l)} for l in names],
+            "by_slice": {"provenance": "measured", "definition": "#/definitions/slice", "unit": "lines of code",
+                         "loc": by_slice},
+        },
+        "left_out": {
+            "commits": {"by_other_accounts": left.get("others", 0), "automation": left.get("automation", 0),
+                        "landed_twice": left.get("landed_twice", 0), "template_or_relay_copy": left.get("copied", 0)},
+            "imports": {"commits": sum(1 for t in data["imports"] if t >= start),
+                        "loc_skipped": sum(n for t, n in data["import_lines"] if t >= start)},
+            "future_dated_file_versions": sum(1 for t, _, _ in data["events"] if t > now + FUTURE_SLACK),
+            "unparsed_commits": data["mismatched"],
+        },
+        "privacy": DATA_PRIVACY,
+        "definitions": DEFINITIONS,
+        "presentation": presentation,
+    }
+
+
 def caption_parts(private):
     """What the panel counts, in three parts, each short enough for a line of the compact caption and all three
     for one line of the wide one: whose repositories, which of them, and what a line is (a line added in a new
@@ -3392,12 +3556,14 @@ def document(body, rows, grow, title_desc):
     # the monospace stack is named once, on a group around everything, instead of on every label
     mono = ' font-family="%s"' % MONO
     body = "<g%s>%s</g>" % (mono, body.replace(mono, "").replace(' font-weight="400"', ""))
-    # the notice is an element, not a comment, so it survives when the relay merges the panel
+    # the notice is an element, not a comment, so it survives when the relay merges the panel; so is the pointer
+    # to the data file, which says in words what the pictures say in pixels
+    note = NOTICE + (" " + DATA_NOTE.format(url=DATA_URL) + "." if DATA_URL else "")
     return ('<svg xmlns="http://www.w3.org/2000/svg" width="%d" height="%d" viewBox="0 0 %d %d" role="img" '
             'aria-labelledby="cp-title cp-desc">\n<title id="cp-title">%s</title><desc id="cp-desc">%s</desc>\n'
             '<metadata>%s</metadata>\n<style>%s</style>\n<defs>%s</defs>\n'
             '%s%s\n'
-            '%s\n</svg>\n' % (PANEL_W, PANEL_H, PANEL_W, PANEL_H, esc(title), esc(desc), esc(NOTICE),
+            '%s\n</svg>\n' % (PANEL_W, PANEL_H, PANEL_W, PANEL_H, esc(title), esc(desc), esc(note),
                               style_sheet(rows, grow), defs, outline(BG), outline("url(#grid)"), body))
 
 
@@ -3539,13 +3705,24 @@ def settings():
 
 
 def previous_meta(path):
-    """Last run's cards.json, or an empty record if it is missing or not what this script writes."""
+    """A JSON file this script wrote last run, or an empty record if it is missing or not a JSON object."""
     try:
         with open(path, encoding="utf-8") as f:
             meta = json.load(f)
     except (OSError, ValueError):
         return {}
     return meta if isinstance(meta, dict) else {}
+
+
+def repositories_last_time():
+    """How many repositories the last run saw: from coderprint.json, or from the cards.json runs before it
+    wrote; None when neither says."""
+    scope = previous_meta(os.path.join(OUT_DIR, DATA_FILE)).get("scope")
+    was = scope.get("repositories", {}).get("visible") if isinstance(scope, dict) and isinstance(
+        scope.get("repositories"), dict) else None
+    if was is None:
+        was = previous_meta(os.path.join(OUT_DIR, LEGACY_DATA_FILE)).get("repositories")
+    return was if isinstance(was, int) and not isinstance(was, bool) else None
 
 
 def new_readme(block):
@@ -3561,7 +3738,7 @@ def new_readme(block):
     bom = raw.startswith(b"\xef\xbb\xbf")
     old = raw[3:].decode("utf-8", "surrogateescape") if bom else raw.decode("utf-8", "surrogateescape")
     eol = "\r\n" if "\r\n" in old else "\n"
-    marked = eol.join((README_START, block, README_END))
+    marked = eol.join([README_START] + block.split("\n") + [README_END])
     a, b = old.find(README_START), old.find(README_END)
     lone = old.strip()
     ours = ("\n" not in lone and (lone.startswith('<a href="%s"' % LINK)
@@ -3623,7 +3800,7 @@ def own_card_only(owner):
 
 
 def main():
-    global DEADLINE, AS_OF, QUANTITY
+    global DEADLINE, AS_OF, QUANTITY, DATA_URL
     signal.signal(signal.SIGTERM, stop_on_term)   # unwinds through the clean-up below instead of dying
     window, pin, music, relay, mark_polys, turn, word = settings()
     DEADLINE = time_limit()
@@ -3631,10 +3808,17 @@ def main():
     own_card_only(owner)
     light, dark = todays_themes(pin)   # keys of THEMES: today's theme's lite and nite
     apple = bool(music) and music[0] == "apple_music"
+    DATA_URL = RAW_ASSETS.format(owner=owner) + DATA_FILE
+    # a comment inside the markers: GitHub keeps it in the file and draws nothing for it, so a reader of the
+    # README's text finds the data file and a visitor sees the same card
+    pointer = "<!-- %s -->" % DATA_NOTE.format(url="assets/%s (%s)" % (DATA_FILE, DATA_URL))
 
     two = bool(relay) or not music   # the two-picture block, which switches to a compact card on phones
 
     def readme_block(alt):
+        return pointer + "\n" + pictures(alt)
+
+    def pictures(alt):
         if not two:
             uid = music[1]
             if apple:
@@ -3663,10 +3847,9 @@ def main():
     new_readme(readme_block(ALT))   # read before any cloning, so a README problem fails early
     repos = list_repositories(owner)
 
-    meta_path = os.path.join(OUT_DIR, "cards.json")
-    before = previous_meta(meta_path)
-    was = before.get("repositories")
-    if isinstance(was, int) and len(repos) < was and not truthy("FORCE"):
+    data_path, legacy_path = os.path.join(OUT_DIR, DATA_FILE), os.path.join(OUT_DIR, LEGACY_DATA_FILE)
+    was = repositories_last_time()
+    if was is not None and len(repos) < was and not truthy("FORCE"):
         say("Fewer repositories are visible than last time (%d, was %d). A repository may have been deleted, "
             "or the token may have lost access, so the existing panels are kept. Run the workflow with force "
             "to overwrite." % (len(repos), was))
@@ -3692,7 +3875,7 @@ def main():
 
     now, days_back = data["now"], WINDOWS[window][2]
     # The zone comes first: every time is moved to the start of its own day there, so nothing drawn or written
-    # tells when in a day anyone worked. Without that, the chart's last day, drawn hours wide, and cards.json
+    # tells when in a day anyone worked. Without that, the chart's last day, drawn hours wide, and the data file
     # together placed each commit of the past week within half an hour.
     shown = profile_offset(owner)
     offset, seen = shown if shown else (None, None)
@@ -3730,13 +3913,15 @@ def main():
         if age <= S:
             commits[min(51, int((S - age) / S * 52))] += 1
     active, longest, current = activity(dated, now, zone)
+    # every language at 1% or more of the window's lines, as the chart draws them, named in the legend or not
+    counted = sum(1 for l in folded(column)[0] if l != OTHER and l not in PROSE)
+    stats = (len(dated), active, longest, current, counted)   # drawn in the rows and written to the data file
     rows = [
-        ("commits · all branches", "{:,}".format(len(dated))),
+        ("commits · all branches", "{:,}".format(stats[0])),
         ("active days", "{:,}".format(active)),
         ("longest streak", plural(longest, "day")),
         ("current streak", plural(current, "day")),
-        # every language at 1% or more of the window's lines, as the chart draws them, named in the legend or not
-        ("languages written", str(sum(1 for l in folded(column)[0] if l != OTHER and l not in PROSE))),
+        ("languages written", str(counted)),
     ]
 
     loc = data.get("code") or {}
@@ -3751,42 +3936,39 @@ def main():
                                                 recent_day, since, commits).encode("utf-8")
              for fname, theme, draw in panels}
     palette = lambda t: {k: THEMES[t][k] for k in ("bg", "text", "muted", "line")}
-    meta = {
-        "generated": dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%dT%H:%MZ"), "window": window,
-        "span_days": int(round(S)), "repositories": len(repos),
-        "commits": int(rows[0][1].replace(",", "")), "new_lines": new_lines,
-        "lines_of_code": {"written": new_lines, "in_use": QUANTITY["production"] + QUANTITY["tests"],
-                          "production": QUANTITY["production"], "tests": QUANTITY["tests"],
-                          "repositories_counted_without_diffs": loc.get("unread", 0)},
-        "imports_skipped": sum(1 for t in data["imports"] if t >= start),
-        "lines_skipped_as_import": sum(n for t, n in data["import_lines"] if t >= start),
-        "commits_left_out": data["left_out"], "repositories_unread": data["unread"],
-        "unparsed_commits": data["mismatched"], "future_dated_left_out": len(data["events"]) - len(events),
-        "theme": theme_of(light), "themes": {"light": light, "dark": dark},
-        "palette": {"light": palette(light), "dark": palette(dark)},
-    }
-    if music:   # the relay reads the music card's service from its key: spotify or apple_music
-        meta[music[0]] = {"uid": music[1]}
+    # what the relay reads (lib/compose.js readCards): the day's palettes and the music card's service, keyed
+    # spotify or apple_music; the rest names the drawings, for a reader of the data file
+    presentation = {"theme": theme_of(light), "themes": {"light": light, "dark": dark},
+                    "palette": {"light": palette(light), "dark": palette(dark)},
+                    "panels": {"wide": {"light": "panel-light.svg", "dark": "panel-dark.svg"},
+                               "compact": {"light": "panel-compact-light.svg", "dark": "panel-compact-dark.svg"}}}
+    if music:
+        presentation[music[0]] = {"uid": music[1]}
+    card = card_data(owner, window, now, zone, start, S, repos, private > 0, data, stats, spark, commits, stream,
+                     column, presentation)
 
     os.makedirs(OUT_DIR, exist_ok=True)
     # coderprint writes these files (the README, the wide panels, the compact panels, the blank image when
-    # the README block shows it, and cards.json) and never deletes anything. The README goes first, being
-    # the one most likely held open by an editor, and cards.json last, so it only ever describes panels in
-    # place.
+    # the README block shows it, and coderprint.json), and deletes only its own cards.json, which
+    # coderprint.json replaced. The README goes first, being the one most likely held open by an editor, and
+    # the data file last, so it only ever describes panels in place.
     files = {README: readme}
     files.update(drawn)
     if two:
         files[os.path.join(OUT_DIR, "blank.svg")] = BLANK_SVG
-    files[meta_path] = (json.dumps(meta, indent=2) + "\n").encode("utf-8")
+    files[data_path] = data_text(card).encode("utf-8")
     try:
         write_all(files)
+        if "palette" in previous_meta(legacy_path):   # this script's own, from before coderprint.json
+            os.remove(legacy_path)
     except OSError:
         raise RuntimeError("the panel files could not be written") from None
+    left = card["left_out"]
     say("panels written (%s, %s, %s): %d repositor%s, %s commits, lines of code %s written and %s in use (%s "
         "production, %s tests), chart over %s, %d import commits skipped, %d commits unparsed, commits left out: %s"
         % (light, dark, window, len(repos), "y" if len(repos) == 1 else "ies", rows[0][1], fmt(new_lines),
            fmt(QUANTITY["production"] + QUANTITY["tests"]), fmt(QUANTITY["production"]), fmt(QUANTITY["tests"]),
-           plural(math.ceil(S - 1e-9), "day"), meta["imports_skipped"], data["mismatched"],
+           plural(math.ceil(S - 1e-9), "day"), left["imports"]["commits"], data["mismatched"],
            ", ".join("%d %s" % (n, why.replace("_", " ")) for why, n in sorted(data["left_out"].items())) or "none"))
     return 0
 

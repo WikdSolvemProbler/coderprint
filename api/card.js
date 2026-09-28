@@ -84,11 +84,16 @@ async function card(request) {
   }
 
   const budget = AbortSignal.timeout(REQUEST_BUDGET_MS);
-  // The panel and cards.json load together; the music card waits only for cards.json, which names it,
-  // and then loads alongside the panel.
+  // The panel and the data file load together; the music card waits only for the data file, which names
+  // it, and then loads alongside the panel. The data file is coderprint.json, or for a profile drawn before
+  // it existed cards.json: both are asked for at once, so the fallback costs no time.
   const panelLoad = loadPanel(user, mode, compact);
-  const cardsText = await fetchText(rawUrl(user, 'cards.json'), JSON_LIMIT_BYTES, GITHUB_TIMEOUT_MS);
-  const cards = cardsText === null ? null : readCards(cardsText, mode);
+  const [dataText, legacyText] = await Promise.all([
+    fetchText(rawUrl(user, 'coderprint.json'), JSON_LIMIT_BYTES, GITHUB_TIMEOUT_MS),
+    fetchText(rawUrl(user, 'cards.json'), JSON_LIMIT_BYTES, GITHUB_TIMEOUT_MS),
+  ]);
+  const cards = (dataText === null ? null : readCards(dataText, mode))
+    ?? (legacyText === null ? null : readCards(legacyText, mode));
   const service = cards?.apple ? 'apple' : 'spotify';
   let musicLoad = null;
   if (cards?.uid) {
@@ -98,7 +103,7 @@ async function card(request) {
   }
   const [panel, musicText] = await Promise.all([panelLoad, musicLoad]);
 
-  if (cards === null) return failure(502, 'cards.json is unavailable or is not a JSON object.');
+  if (cards === null) return failure(502, 'coderprint.json is unavailable or is not a JSON object.');
   const glow = mode === 'dark';
   if (panel.compact) {
     const svg = buildCompactCard(panel.compact, musicText, cards.palette, { glow, service });
