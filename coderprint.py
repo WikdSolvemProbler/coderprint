@@ -155,6 +155,7 @@ import urllib.request
 import zlib
 from array import array
 from collections import Counter, deque, namedtuple
+from fractions import Fraction
 
 try:
     import zoneinfo
@@ -424,7 +425,7 @@ NAMES = {
 # Whole file names matched as written, whose lowercase would claim a build script of anyone's (a file named build)
 CASED_NAMES = {"BUILD": "Starlark", "WORKSPACE": "Starlark"}   # Bazel's, as Linguist names them
 OTHER = "Other"
-PROSE = {"Markdown"}  # not a programming language, so it is left out of the languages-written count
+PROSE = {"Markdown"}  # not a programming language, so it is left out of the stats row's languages count
 
 # The design lives in design/, apart from this code and under its own license (design/LICENSE.md): the
 # themes (design/themes.json), the chart's colors (design/palette.json) and the wordmark
@@ -6165,10 +6166,12 @@ def esc(s):
     return str(s).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace('"', "&quot;")
 
 
-def text(x, y, s, size, fill, family, weight=400, anchor="start", spacing=0):
-    return ('<text x="%.1f" y="%.1f" font-family="%s" font-size="%s" font-weight="%d" fill="%s"%s%s>%s</text>'
+def text(x, y, s, size, fill, family, weight=400, anchor="start", spacing=0, length=None):
+    """A line of text; length, when given, is the width a viewer fits it to, glyphs and all, in any face."""
+    return ('<text x="%.1f" y="%.1f" font-family="%s" font-size="%s" font-weight="%d" fill="%s"%s%s%s>%s</text>'
             % (x, y, family, size, weight, fill, ' text-anchor="%s"' % anchor if anchor != "start" else "",
-               ' letter-spacing="%s"' % spacing if spacing else "", esc(s)))
+               ' letter-spacing="%s"' % spacing if spacing else "",
+               ' textLength="%s" lengthAdjust="spacingAndGlyphs"' % num(length, 2) if length else "", esc(s)))
 
 
 def label(x, y, s, anchor="start", fill=None, size=9.5):
@@ -6289,6 +6292,11 @@ def burst_labels(spark, tops, avoid, x0=16, span=264.0, size=BURST_SIZE):
 # above the baseline in squares dot wide.
 Rows = namedtuple("Rows", "x right top pitch name value vchar rise dot")
 ROWS = Rows(306, 560, 56, 24, 9.5, 13, 7.6, 3, 1.6)
+# The stats row that counts languages: every language at FOLD (1%) or more of the window's lines of code, named on
+# the chart or not. Its name says what it counts, the threshold included, so it never reads as every language
+# written; and the words for screen readers and the README's alt text say the same, for many and for one.
+LANGUAGES_ROW = "languages · 1%+"
+LANGUAGES_WORDS = ("{v} languages at 1% or more of the lines of code", "1 language at 1% or more of the lines of code")
 
 
 def leader(name, value):
@@ -6391,15 +6399,65 @@ def story_figures():
     return written, use, prod, tests, min(shown, prod / float(written)), shown
 
 
-def kept_shares(P, U):
-    """What is kept, and production's and tests' shares, as whole percentages of what was written, the two
-    parts rounded so they add up to what is kept."""
-    kept = int(round(100 * U))
+def share_label(whole, exact):
+    """A share of what was written as the ring's middle and the words write it, whole being its percentage from
+    kept_shares and exact the share itself: never 0% for a share above nothing, which says <1%, as the legend's
+    shares do."""
+    return "<1%" if whole == 0 and exact > 0 else "%d%%" % whole
+
+
+def kept_shares(P, U, counts=None):
+    """What is kept, and production's and tests' shares, as whole percentages of what was written: rounded half
+    up, as a reader rounds, not to even as Python does, and the two parts rounded so they add up to what is kept.
+    None of them says 100% while anything is missing from it: not what is kept while any line written is gone,
+    and not a part while the other holds any line.
+
+    counts: (written, production, tests), from which the shares are taken exactly, as fractions, clamped as
+    story_figures clamps them. Without whole numbers there it rounds the shares P and U themselves, in floating
+    point, nudged so that an exact half stored just below it (29 of 200 is 14.499999999999998%) still rounds up;
+    that nudge could also round up a share less than a billionth of a percent under a half, which takes more than
+    500 million lines written."""
+    if counts and all(isinstance(n, int) and n >= 0 for n in counts) and counts[0] > 0:
+        written, prod, tests = counts
+        U = min(Fraction(1), Fraction(prod + tests, written))
+        P = min(U, Fraction(prod, written))
+        kept = math.floor(100 * U + Fraction(1, 2))
+    else:
+        kept = int(math.floor(100 * U + 0.5 + 1e-9))
+    if kept == 100 and U < 1:   # never all of it while any is gone
+        kept = 99
     exact = (100 * P, 100 * (U - P))
     whole = [int(math.floor(v)) for v in exact]
     for k in sorted(range(2), key=lambda k: exact[k] - whole[k], reverse=True)[:max(0, kept - sum(whole))]:
         whole[k] += 1
+    for k in range(2):   # a part is everything written only when the other part holds nothing
+        if whole[k] == 100 and exact[1 - k] > 0:
+            whole[k], whole[1 - k] = 99, whole[1 - k] + 1
     return kept, whole[0], whole[1]
+
+
+# A headline figure's characters, in em: in the wider at each character of the two bold faces of SANS a viewer
+# most likely has (Segoe UI Bold's digits and M, Arial Bold's B and point; k, as every other character, a digit's),
+# and in DejaVu Sans Bold, wider than either at every character, which a viewer with neither may fall back to.
+# Each was measured with the face set at 1000 units to the em, and rounded up. FIGURE_GAP: the room kept clear
+# before a tile's rule.
+FIGURE_EM, FIGURE_DIGIT = {"M": 0.96, "B": 0.73, ".": 0.28}, 0.58
+FIGURE_EM_WIDEST, FIGURE_DIGIT_WIDEST = {"M": 1.0, "B": 0.77, ".": 0.38, "k": 0.67}, 0.7
+FIGURE_GAP = 2
+
+
+def fitted(s, size, room):
+    """The font size a headline figure s is set at, and the length it is held to, or None. How wide a figure is
+    drawn depends on the viewer's own font, which cannot be known here. So the size is size, or less when s at
+    size would be wider than room in the faces FIGURE_EM measures; and a figure that could still run past room
+    in the widest face a viewer may fall back to (FIGURE_EM_WIDEST) is also held to its width in FIGURE_EM, which
+    a viewer that reads textLength fits it to exactly in whatever face it has. A viewer that ignores textLength
+    falls back on the size alone, which fits in the faces FIGURE_EM measures and may not in a wider one."""
+    em = sum(FIGURE_EM.get(ch, FIGURE_DIGIT) for ch in s)
+    if size * em > room:
+        size = num(math.floor(10.0 * room / em) / 10.0)
+    widest = sum(FIGURE_EM_WIDEST.get(ch, FIGURE_DIGIT_WIDEST) for ch in s)
+    return size, (math.floor(100.0 * float(size) * em) / 100.0 if float(size) * widest > room else None)
 
 
 def keyframes(name, prop, stops):
@@ -6415,7 +6473,7 @@ def quantity_head(g, window):
     around its glow: fading a shape inside a filter itself makes Chrome and Edge paint a black tile at the
     panel's corner."""
     written, use, prod, tests, P, U = story_figures()
-    kept, prod_pct, tests_pct = kept_shares(P, U)
+    kept, prod_pct, tests_pct = kept_shares(P, U, (written, prod, tests))
     story = written > 0 and U > 0
     yellow = YELLOW if THEME["dark"] else YELLOW_LITE
     lit = lambda cls, content: ('<g class="cp-q %s" opacity="0">%s</g>' % (cls, glow("glowG", content))
@@ -6429,8 +6487,13 @@ def quantity_head(g, window):
              (tests, "tests", TEXT, "cp-qt", GREEN), (written, "written", MUTED, "cp-qw", RED)]
     for i, (n, word, fill, cls, color) in enumerate(cells):
         tx = x0 + i * width + (pad if i else 0)
-        out += glow("glowW" if i == 0 else "glowS", text(tx, figure_y, fmt(n), figure_size, fill, SANS, 700))
-        out += label(tx, word_y, word, size=word_size) + lit(cls, text(tx, figure_y, fmt(n), figure_size, color, SANS, 700))
+        # a figure too wide for its tile is set smaller and held to its width (see fitted), so it runs into no
+        # rule and not past the last tile
+        s = fmt(n)
+        size, length = fitted(s, figure_size, x0 + (i + 1) * width - tx - (FIGURE_GAP if i < 3 else 0))
+        out += glow("glowW" if i == 0 else "glowS", text(tx, figure_y, s, size, fill, SANS, 700, length=length))
+        out += label(tx, word_y, word, size=word_size) + lit(cls, text(tx, figure_y, s, size, color, SANS, 700,
+                                                                       length=length))
         if i:
             out += '<line x1="%s" y1="%s" x2="%s" y2="%s" stroke="%s"/>' % (
                 num(x0 + i * width), num(rule_top), num(x0 + i * width), num(rule_bottom), LINE)
@@ -6439,8 +6502,10 @@ def quantity_head(g, window):
     bx0, bx1, by, bh = g.bar
     W, yc = bx1 - bx0, by + bh / 2.0
     D = W - bh
-    dash = lambda f: max(0.01, f * W - bh)          # the dash that shows fraction f of the bar
-    off = lambda f: D - dash(f)                       # and its offset under a dash of the whole length
+    # the dash that shows fraction f of the bar, a dot at least (its round ends are the dot); and its offset under a
+    # dash of the whole length, which for a share of 0 puts the whole dash before the line's start, so none shows
+    dash = lambda f: max(0.01, f * W - bh)
+    off = lambda f: D - dash(f) if f > 0 else D + 1
     whole = "%s %s" % (num(D, 2), num(2 * W, 2))
 
     def line(color, pattern, offset, cls=""):
@@ -6458,13 +6523,16 @@ def quantity_head(g, window):
     out += lit("cp-qw", line(RED, whole, 0)) + lit("cp-qu", line(yellow, "%s %s" % (num(dash(U), 2), num(2 * W, 2)), 0))
     if P > 0:
         out += lit("cp-qp", line(GREEN, "%s %s" % (num(dash(P), 2), num(2 * W, 2)), 0))
-    if U > P:
-        out += lit("cp-qt", line(GREEN, "%s %s" % (num(max(0.01, (U - P) * W - bh), 2), num(2 * W, 2)), -P * W))
+    if U > P:   # from production's end; or, when production all but fills the bar, a dot at the line's end
+        tail = max(0.01, (U - P) * W - bh)
+        out += lit("cp-qt", line(GREEN, "%s %s" % (num(tail, 2), num(2 * W, 2)), -min(P * W, D - tail)))
 
-    # the ring: the same layers around a circle turned to start at the top
+    # the ring: the same layers around a circle turned to start at the top. As on the bar, a share above 0 shows
+    # a dot at least and a share of 0 shows none; C(1 - f) alone would leave a share narrower than the stroke a
+    # dash shorter than nothing, which draws nothing at all.
     cx, cy, r, sw, middle_size, middle_word = g.ring
     C = 2 * math.pi * r
-    roff = lambda f: C * (1 - f)
+    roff = lambda f: C * (1 - f) if f * C - sw >= 0.01 else (C - sw - 0.01 if f > 0 else C)
 
     def ring(color, pattern, offset, cls=""):
         return ('<circle%s cx="%s" cy="%s" r="%s" fill="none" stroke="%s" stroke-width="%s" stroke-linecap="round" '
@@ -6487,19 +6555,21 @@ def quantity_head(g, window):
     if U > P:
         out += lit("cp-qt", ring(GREEN, "%s %s" % (num(max(0.01, (U - P) * C - sw), 2), num(2 * C, 2)), -P * C))
 
-    # the ring's middle: what is kept at rest, and in the story, 100%, then kept, then production, then tests
+    # the ring's middle: what is kept at rest, and in the story, 100%, then kept, then production, then tests, each
+    # as share_label writes it
     def middle(cls, share, word, shown):
         if not story and not shown:
             return ""
         fy = cy + middle_size * (0.2 if middle_word else 0.36)
-        s = glow("glowS", text(cx, fy, "%d%%" % share, middle_size, TEXT, SANS, 700, "middle"))
+        s = glow("glowS", text(cx, fy, share, middle_size, TEXT, SANS, 700, "middle"))
         if middle_word and word:
             s += label(cx, fy + middle_word + 6, word, "middle", size=middle_word)
         if not story:
             return s
         return '<g class="cp-q %s"%s>%s</g>' % (cls, "" if shown else ' opacity="0"', s)
-    out += middle("cp-qmk", kept, "kept", True) + middle("cp-qmw", 100, None, False)
-    out += middle("cp-qmp", prod_pct, "prod", False) + middle("cp-qmt", tests_pct, "tests", False)
+    out += middle("cp-qmk", share_label(kept, U), "kept", True) + middle("cp-qmw", "100%", None, False)
+    out += (middle("cp-qmp", share_label(prod_pct, P), "prod", False)
+            + middle("cp-qmt", share_label(tests_pct, U - P), "tests", False))
     if not story:
         return out, ""
 
@@ -6818,25 +6888,30 @@ def folded(column):
 
 
 def words(window, new_lines, spark, rows, column, since=None):
-    """The panel's title and description for screen readers, in sentences, every number one it draws."""
+    """The panel's title and description for screen readers, in sentences, every number and date it draws."""
     span = "all time" if window == "all" else "the last " + WINDOWS[window][1]
-    written, use, prod, tests, _, _ = story_figures() if QUANTITY else (new_lines, 0, 0, 0, 0, 0)
-    title = "coderprint: %s lines of code in use, of %s written, %s" % (fmt(use), fmt(written), span)
+    written, use, prod, tests, P, U = story_figures() if QUANTITY else (new_lines, 0, 0, 0, 0.0, 0.0)
+    lines = "line" if use == 1 else "lines"
+    title = "coderprint: %s %s of code in use, of %s written, %s" % (fmt(use), lines, fmt(written), span)
     phrases = {"commits · all branches": "{v} commits across all branches", "active days": "{v} active days",
                "longest streak": "a longest streak of {v}", "current streak": "a current streak of {v}",
-               "languages written": "{v} languages written"}
+               LANGUAGES_ROW: LANGUAGES_WORDS[0]}
     one = {"commits · all branches": "1 commit across all branches", "active days": "1 active day",
-           "languages written": "1 language written"}
+           LANGUAGES_ROW: LANGUAGES_WORDS[1]}
     stats = [one[name] if value == "1" and name in one else phrases.get(name, name + " {v}").format(v=value)
              for name, value in rows]
-    desc = "%s lines of code in use (%s in production, %s in tests), of %s written (%s%s)" % (
-        "{:,}".format(use), "{:,}".format(prod), "{:,}".format(tests), "{:,}".format(written), span,
+    desc = "%s %s of code in use (%s in production, %s in tests), of %s written (%s%s)" % (
+        "{:,}".format(use), lines, "{:,}".format(prod), "{:,}".format(tests), "{:,}".format(written), span,
         ", charted since %s" % since if since else "")
     desc += (": " + ", ".join(stats[:-1]) + (", and " if len(stats) > 1 else "") + stats[-1] + ".") if stats else "."
     groups = bursts(spark)
     if len(groups) > 1:
         sizes = [fmt(g[2]) for g in groups]
         desc += " They came in %d bursts of %s and %s lines of code." % (len(groups), ", ".join(sizes[:-1]), sizes[-1])
+    # the day the bars end on, as drawn at their right end; the README's alt text is given no bars, so it names
+    # no date, and a day passing changes nothing in the README by itself
+    if AS_OF and spark:
+        desc += " The bars end on %s, the day this panel was drawn." % AS_OF
     totals, _ = folded(column)
     if totals:
         top = [l for l, _ in totals.most_common() if l != OTHER][:TOP_N]
@@ -6849,6 +6924,9 @@ def words(window, new_lines, spark, rows, column, since=None):
         desc += " Share of lines of code by language: %s." % ", ".join(
             "%s %s" % ("other languages" if l == OTHER else l, shown[l].replace("<1%", "under 1%"))
             for l in sorted(amount, key=lambda l: (l == OTHER, -amount[l])))
+    if QUANTITY and written > 0:   # the ring's middle, in words too
+        kept = kept_shares(P, U, (written, prod, tests))[0]
+        desc += " Of what was written, %s is kept." % share_label(kept, U).replace("<1%", "under 1%")
     return title, desc
 
 
@@ -7020,7 +7098,7 @@ def card_data(owner, window, now, zone, start, S, repos, private, data, stats, s
     window's first moment, or -inf for all time; S: the chart's span in days; stats: commits, active days,
     longest streak, current streak and languages counted, as drawn; presentation: what the relay reads."""
     written, use, prod, tests, P, U = story_figures()
-    kept, prod_pct, tests_pct = kept_shares(P, U)
+    kept, prod_pct, tests_pct = kept_shares(P, U, (written, prod, tests))
     n_commits, active, longest, current, counted = stats
     readable = sum(1 for r in repos if not (r.get("isDisabled") or r.get("isLocked")))
     totals, small = folded(column)
@@ -7070,9 +7148,13 @@ def card_data(owner, window, now, zone, start, S, repos, private, data, stats, s
             "test_loc": figure(tests, "lines of code", "measured", "test"),
             "retained_fraction": figure(round(use / float(written), 4) if written else None, "fraction", "derived",
                                         "retained_fraction", equals="in_use_loc / written_loc"),
+            # the percentages as whole numbers, and as the ring's middle writes them, which says <1% for a share
+            # above nothing that rounds to 0
             "as_drawn": {"provenance": "display", "written": fmt(written), "in_use": fmt(use),
                          "production": fmt(prod), "tests": fmt(tests), "kept_percent": kept,
-                         "production_percent": prod_pct, "test_percent": tests_pct},
+                         "production_percent": prod_pct, "test_percent": tests_pct,
+                         "kept_label": share_label(kept, U), "production_label": share_label(prod_pct, P),
+                         "test_label": share_label(tests_pct, U - P)},
         },
         "activity": {
             "commits": figure(n_commits, "commits", "measured", "commit"),
@@ -7543,7 +7625,7 @@ def main():
         ("active days", "{:,}".format(active)),
         ("longest streak", plural(longest, "day")),
         ("current streak", plural(current, "day")),
-        ("languages written", str(counted)),
+        (LANGUAGES_ROW, str(counted)),
     ]
 
     loc = data.get("code") or {}
