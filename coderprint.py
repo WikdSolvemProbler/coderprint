@@ -23,16 +23,20 @@ most others with their literals followed (see read_lines). Prose (Markdown, TeX,
 (YAML, TOML), notebooks and files no language claims are not code. Written: the lines of code added in a file
 version, read from its commit's diff as the whole version reads them (see read_added_code) and counted once, the
 first time its exact content appears in any repository or branch; a commit that only reformats many files at
-once (see sweep) adds nothing for them. In use: the lines of code on each default branch today whose text the
-owner added, split into production and test code by where they live (see is_test). Copies, moves, merges, branch landings and
+once (see sweep) adds nothing for the files whose lines still read alike. In use: the lines of code on each
+default branch today whose text the owner added, split into production and test code by where they live (see
+is_test). Copies, moves (those git does not pair as well, see moved_files), merges, branch landings and
 cross-repository imports all reuse content that already exists, so they add nothing. Only the owner's own
 commits count (see authorship); others', automation's, and a second landing of one change add nothing. A
-commit that adds more than IMPORT_FILES brand-new files of counted code is treated as bringing in an
-existing codebase, not writing one: it is a commit, but adds no lines. File versions from another account's
-template, or from coderprint itself in a relay copy, count as already written. Vendored folders, generated
-output (by folder, by name, or by a generator's mark in a file's first lines), lockfiles, submodules, symbolic
-links and data files never count, nor do the paths a repository's .gitattributes marks linguist-vendored,
-linguist-generated or linguist-documentation, nor a gh-pages branch that is not the default. Every time is moved
+commit that adds more than IMPORT_FILES brand-new files of code, or a run of commits that adds them in parts
+(see import_runs), is treated as bringing in an existing codebase, not writing one: it is a commit, but adds no
+lines. A path is read exactly, whatever it holds, and the settings of the machine's git that would change what a
+history reads as are pinned (see READ_CONFIG), so a local run reads what the Action reads. File versions from
+another account's template, or from coderprint itself in a relay copy, count as already written. Vendored
+folders, generated output (by folder, by name, or by a generator's mark in a file's first lines), lockfiles,
+submodules, symbolic links, Git LFS pointers and data files never count, nor do the paths a repository's
+.gitattributes marks linguist-vendored, linguist-generated or linguist-documentation, nor a gh-pages branch
+that is not the default, even where a tag reaches it (see pages_only). Every time is moved
 to the start of its day before anything is drawn or written. A file's language is read from its name or
 extension alone, named as GitHub's Linguist names it (the legends shorten the few names too long for them:
 Visual Basic .NET is vb.net there). An extension several languages share counts as Other (.h, .m, .pl, .v),
@@ -127,6 +131,7 @@ import functools
 import gzip
 import hashlib
 import http.client
+import itertools
 import json
 import math
 import os
@@ -180,9 +185,16 @@ Commit = namedtuple("Commit", "ts repo sha bot email name subject files")
 Change = namedtuple("Change", "blob status path added deleted")
 # A sweep: a commit that modifies at least SWEEP_FILES counted files, nearly every one (SWEEP_SHARE) adding
 # within SWEEP_BALANCE of what it deletes, as reformatting, re-indenting or a line-ending change does. Its
-# balanced files add no lines. git's own whitespace options (-w, -b) would say the same file by file, but
-# on real histories they made reading hundreds of times slower and dropped files from the line counts.
+# balanced files that delete a line add no lines (one that only gains a line was written to). git's own whitespace
+# options (-w, -b) would say the same file by file, but on real histories they made reading hundreds of times
+# slower and dropped files from the line counts.
 SWEEP_FILES, SWEEP_SHARE, SWEEP_BALANCE = 10, 0.9, 0.1
+# And a file of such a commit is swept only when its changes are alike: at least SWEEP_ALIKE of its changed lines of
+# code still read nearly as they did (difflib's ratio ALIKE_RATIO or more, spacing aside), as a re-indented, re-ended
+# or renamed line does (see alike_share). A rewrite that happens to add what it deletes, a migration or a new body,
+# is written again, as README says a rewrite is; so is a file that only gains lines.
+SWEEP_ALIKE, ALIKE_RATIO = 0.8, 0.6
+SWEEP_WATCH = set()   # the commits of the repository being read that could be sweeps, whose changes are paired
 NOTICE = ("Drawn by coderprint (https://github.com/WikdSolvemProbler/coderprint): its code, design and wordmark are "
           "Peter Shiller's, licensed as LICENSE.md, design/LICENSE.md and NOTICE.md there say. What the card reports "
           "is its owner's.")
@@ -694,16 +706,72 @@ def git_auth():
 
 
 def clone(owner, name, dest):
-    """Bare clone of every branch. Output is swallowed, because it would name the repository. A cached
-    clone is pointed at this repository's address before fetching, so a slot can never read another."""
+    """Bare clone of every branch and tag. Output is swallowed, because it would name the repository. A cached
+    clone (CLONE_CACHE) is pointed at this repository's address before fetching, so a slot can never read another,
+    and is brought to what a fresh clone would hold: its branches and tags fetched and those deleted upstream pruned,
+    so a tag a force-push left behind brings in nothing, and its HEAD pointed where the repository's own points now,
+    so a default branch renamed or switched since is the one read at the head."""
     flags, env = git_auth()
     url = "https://github.com/%s/%s.git" % (owner, name)
     if os.path.isdir(dest):
         run(["git", "-C", dest, "remote", "set-url", "origin", url])
-        run(["git", "-C", dest] + flags + ["fetch", "--quiet", "--prune", "origin", "+refs/heads/*:refs/heads/*"],
-            env=env)
+        run(["git", "-C", dest] + flags + ["fetch", "--quiet", "--prune", "origin", "+refs/heads/*:refs/heads/*",
+                                           "+refs/tags/*:refs/tags/*"], env=env)
+        said = run(["git", "-C", dest] + flags + ["ls-remote", "--symref", "origin", "HEAD"], env=env)
+        points = re.search(r"(?m)^ref: (refs/heads/[^\t\n]+)\tHEAD$", said.decode("utf-8", "replace"))
+        if points:
+            run(["git", "-C", dest, "symbolic-ref", "HEAD", points.group(1)])
         return
     run(["git"] + flags + ["clone", "--bare", "--quiet", url, dest], env=env)
+
+
+# git reads a clone the same way on every machine. A local run inherits the machine's own git settings, and some of
+# them change what a history reads as: log.showRoot=false hides every root commit's files, a global or system
+# attributes file can mark code as binary or change its diff, a low core.bigFileThreshold makes big files binary, a
+# global mailmap renames authors, and diff.noprefix, diff.mnemonicPrefix, diff.interHunkContext, diff.algorithm,
+# diff.renameLimit and diff.submodule change what the diffs look like. Each is pinned to git's own default for every
+# command that reads a history (the prefixes are given on the command line as well); the machine's other settings,
+# safe.directory among them, still apply.
+READ_CONFIG = ["-c", "core.quotepath=off", "-c", "log.showRoot=true", "-c", "log.showSignature=false",
+               "-c", "core.attributesFile=" + os.devnull, "-c", "core.bigFileThreshold=512m",
+               "-c", "mailmap.file=" + os.devnull, "-c", "i18n.logOutputEncoding=UTF-8",
+               "-c", "diff.noprefix=false", "-c", "diff.mnemonicPrefix=false", "-c", "diff.interHunkContext=0",
+               "-c", "diff.algorithm=myers", "-c", "diff.renameLimit=1000", "-c", "diff.submodule=short"]
+
+
+def read_env():
+    """The environment a reading git runs in: the system attributes file left out (GIT_ATTR_NOSYSTEM), and the
+    variables that would change a diff's shape (GIT_DIFF_OPTS, GIT_EXTERNAL_DIFF) removed."""
+    env = dict(os.environ, GIT_ATTR_NOSYSTEM="1")
+    for name in ("GIT_DIFF_OPTS", "GIT_EXTERNAL_DIFF"):
+        env.pop(name, None)
+    return env
+
+
+GIT_ESCAPES = {"a": 7, "b": 8, "t": 9, "n": 10, "v": 11, "f": 12, "r": 13, '"': 34, "\\": 92}
+
+
+def git_path(text):
+    """A path as git prints it outside -z output, unquoted. Even with core.quotepath off, git puts a path that holds
+    a double quote, a backslash or a control character (a tab, a newline) in double quotes, with C escapes and octal
+    bytes; every other byte it prints as it is. Undoing that is exact; a quoted name git would not have written is
+    kept as it stands."""
+    if len(text) < 2 or text[0] != '"' or text[-1] != '"':
+        return text
+    out, i, s = bytearray(), 0, text[1:-1]
+    while i < len(s):
+        if s[i] == "\\" and s[i + 1:i + 2] in GIT_ESCAPES:
+            out.append(GIT_ESCAPES[s[i + 1]])
+            i += 2
+        elif s[i] == "\\" and re.fullmatch(r"[0-7]{3}", s[i + 1:i + 4]):
+            out.append(int(s[i + 1:i + 4], 8) & 0xFF)
+            i += 4
+        elif s[i] == "\\":
+            return text   # not git's quoting
+        else:
+            out += s[i].encode("utf-8")
+            i += 1
+    return out.decode("utf-8", "replace")
 
 
 def language_of(path):
@@ -753,35 +821,62 @@ def automated(name, email, committer, committer_email):
             or email.strip().lower() in AUTOMATION_EMAILS or committer_email.strip().lower() in AUTOMATION_EMAILS)
 
 
+def pages_only(repo_dir):
+    """The commits only a gh-pages branch that is not the default holds. --exclude keeps the branch itself out of
+    --all, but a tag on one of its commits would still bring them in, built bundles and all."""
+    if not run(["git", "-C", repo_dir, "for-each-ref", "refs/heads/gh-pages"]).strip():
+        return set()
+    try:
+        if run(["git", "-C", repo_dir, "symbolic-ref", "-q", "HEAD"]).strip() == b"refs/heads/gh-pages":
+            return set()   # the default, and read as such
+    except RuntimeError as e:
+        if "exited" not in str(e):   # a detached HEAD exits 1; running out of time is not that
+            raise
+    out = run(["git", "-C", repo_dir, "rev-list", "refs/heads/gh-pages", "--not", "--exclude=gh-pages", "--branches"])
+    return set(out.decode("ascii", "replace").split())
+
+
 def read_commits(repo_dir, index, renames=True):
-    """Every non-merge commit on every branch but gh-pages, with its author's name and address, its subject
-    and each file's new blob and lines added and deleted. Submodules and symbolic links (LINKS) are left out. Records
-    are split on NUL, which no git author name, subject or unquoted path can contain; the subject is never printed
-    or written."""
+    """Every non-merge commit on every branch but gh-pages (see pages_only), with its author's name and address, its
+    subject and each file's new blob and lines added and deleted, children before their parents (--date-order), so
+    collect can read the commits of one second parent first. Submodules and symbolic links (LINKS) are left out.
+    Records are split on NUL and a record's fields on newlines: git strips newlines from every name and address and a
+    subject never holds one, while a name may hold any other control character, 0x1F included. Lines are split on
+    newlines alone, never where str.splitlines would also split (U+2028, U+2029, U+0085, 0x1C to 0x1E), which
+    core.quotepath=off leaves unquoted in a path; the characters git does quote are unquoted (git_path). The
+    subject is never printed or written."""
     if not run(["git", "-C", repo_dir, "for-each-ref", "--count=1", "refs/heads"]).strip():
         return [], 0  # an empty repository has nothing to read
-    out = run(["git", "-C", repo_dir, "-c", "core.quotepath=off", "log", "--exclude=refs/heads/gh-pages", "--all",
-               "--no-merges", "-M" if renames else "--no-renames", "--no-abbrev", "--no-textconv", "--raw", "--numstat",
-               "--format=%x00%H%x1f%at%x1f%an%x1f%aE%x1f%cn%x1f%cE%x1f%s"]).decode("utf-8", "replace")
+    pages = pages_only(repo_dir)
+    out = run(["git", "-C", repo_dir] + READ_CONFIG + [
+               "log", "--exclude=refs/heads/gh-pages", "--all", "--date-order", "--no-merges",
+               "-M" if renames else "--no-renames", "--no-abbrev", "--no-textconv", "--no-ext-diff", "--no-color",
+               "--raw", "--numstat", "--format=%x00%H%n%at%n%an%n%aE%n%cn%n%cE%n%s"],
+              env=read_env()).decode("utf-8", "replace")
     commits, mismatched = [], 0
     for block in out.split("\x00")[1:]:
-        head, _, body = block.partition("\n")
-        parts = head.split("\x1f", 6)
+        parts = block.split("\n", 7)
+        body = parts.pop() if len(parts) == 8 else ""
         if (len(parts) != 7 or not re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", parts[0])
                 or not parts[1].isdigit()):
             mismatched += 1
             continue
         sha, ts, author, email, committer, committer_email, subject = parts
-        raw, num = [], []
-        for line in body.splitlines():
+        if sha in pages:
+            continue
+        raw, num, broken = [], [], False
+        for line in body.split("\n"):
             if line.startswith(":"):
                 meta, _, paths = line.partition("\t")
                 fields = meta.split()
-                raw.append((fields[3], fields[4][0], paths.split("\t")[-1], fields[1]))
+                if len(fields) < 5 or not fields[4]:
+                    broken = True
+                    break
+                raw.append((fields[3], fields[4][0], git_path(paths.split("\t")[-1]), fields[1]))
             elif line.count("\t") >= 2:
                 a, d, _ = line.split("\t", 2)
                 num.append((None, None) if a == "-" else (int(a), int(d)))
-        if len(raw) != len(num):
+        if broken or len(raw) != len(num):
             mismatched += 1
             continue
         files = [Change(blob, status, path, added, deleted)
@@ -791,31 +886,84 @@ def read_commits(repo_dir, index, renames=True):
     return commits, mismatched
 
 
-def sweep(counted):
-    """The files of a commit that only reformat (see SWEEP_FILES): its modified counted files that add about
-    what they delete, when there are at least SWEEP_FILES of them and nearly all are like that. Otherwise
-    none. First writes are never touched, so a sweep cannot hide new files."""
+def balanced_files(counted):
+    """A commit's modified counted files that add about what they delete (see SWEEP_FILES), and all it modified."""
     changed = [f for f in counted if f.status in ("M", "R") and f.added]
-    balanced = [f for f in changed if abs(f.added - f.deleted) <= max(1, SWEEP_BALANCE * max(f.added, f.deleted))]
+    return [f for f in changed if abs(f.added - f.deleted) <= max(1, SWEEP_BALANCE * max(f.added, f.deleted))], changed
+
+
+def sweep(counted, alike=None, sha=None):
+    """The files of a commit that only reformat (see SWEEP_FILES): when at least SWEEP_FILES of its modified counted
+    files add about what they delete and nearly all are like that, those of them that delete a line (one that only
+    gains a line was written to, not reformatted) and, where alike holds the commit's changes (read_added_code's
+    ALIKE, by (commit, blob)), whose changed lines still read alike (SWEEP_ALIKE): a rewrite that happens to add what
+    it deletes is written again. A file whose changes could not be paired stays swept, as the shape alone says.
+    Otherwise none. First writes are never touched, so a sweep cannot hide new files."""
+    balanced, changed = balanced_files(counted)
     if len(balanced) >= SWEEP_FILES and len(balanced) >= SWEEP_SHARE * len(changed):
-        return set(balanced)
+        swept = {f for f in balanced if f.deleted}
+        if alike is not None:
+            swept = {f for f in swept if alike.get((sha, f.blob), SWEEP_ALIKE) >= SWEEP_ALIKE}
+        return swept
     return set()
+
+
+def could_sweep(files):
+    """Whether any part of a commit's files could make a sweep (see sweep): at least SWEEP_FILES of them balanced.
+    collect has read_added_code pair the changed lines of these commits only (SWEEP_WATCH)."""
+    return len(balanced_files(files)[0]) >= SWEEP_FILES
+
+
+def alike(a, b):
+    """Whether two lines of code, spacing collapsed, read nearly alike (ALIKE_RATIO), as a re-indented, re-ended or
+    renamed line does and a rewritten one does not."""
+    if a == b:
+        return True
+    m = difflib.SequenceMatcher(None, a, b, autojunk=False)
+    return m.real_quick_ratio() >= ALIKE_RATIO and m.quick_ratio() >= ALIKE_RATIO and m.ratio() >= ALIKE_RATIO
+
+
+def alike_share(hunks):
+    """The share of a file's changed lines of code that still read alike: hunks is [(removed lines, added lines)], each
+    line's text with its spacing collapsed. A line removed in one place and added unchanged in another (sorted
+    imports) is alike wherever it went; the rest are paired in order within each hunk. None when nothing pairs."""
+    same = Counter(t for removed, _ in hunks for t in removed) & Counter(t for _, added in hunks for t in added)
+    pairs = matched = sum(same.values())
+    left = (same.copy(), same.copy())
+
+    def rest(lines, budget):   # the lines not already matched unchanged elsewhere in the file
+        kept = []
+        for t in lines:
+            if budget[t] > 0:
+                budget[t] -= 1
+            else:
+                kept.append(t)
+        return kept
+
+    for removed, added in hunks:
+        for a, b in zip(rest(removed, left[0]), rest(added, left[1])):
+            pairs += 1
+            matched += alike(a, b)
+    return matched / float(pairs) if pairs else None
 
 
 def ignored_revs(repo_dir):
     """The commits a repository names in .git-blame-ignore-revs on its default branch: sweeps its owner
-    marked as reformatting, not writing. They still count as commits, but add no lines."""
+    marked as reformatting, not writing. They still count as commits, but add no lines. git reads a hash in either
+    case, and so does this."""
     try:
         text = run(["git", "-C", repo_dir, "show", "HEAD:.git-blame-ignore-revs"], timeout=60)
     except RuntimeError:
         return set()
-    return set(re.findall(r"(?m)^[ \t]*([0-9a-f]{64}|[0-9a-f]{40})\b", text.decode("utf-8", "replace")))
+    listed = re.findall(r"(?mi)^[ \t]*([0-9a-f]{64}|[0-9a-f]{40})\b", text.decode("utf-8", "replace"))
+    return {h.lower() for h in listed}
 
 
 def read_repository(owner, name, dest, index):
     """Clone and read one repository, trying each once more on failure, the second time without rename
-    detection if the first timed out (moving many paths at once slows it down past any limit). Returns its
-    commits, how many could not be parsed, and the commits it marks as sweeps."""
+    detection if the first timed out (moving many paths at once slows it down past any limit); a move that retry
+    reads as files deleted and added is still a move, not an import (see moved_files). Returns its commits, how
+    many could not be parsed, and the commits it marks as sweeps."""
     renames = True
     for attempt in (1, 2):
         try:
@@ -2185,14 +2333,14 @@ def limit():
     return min(TIMEOUT, int(left))
 
 
-def git_lines(args, handle, feed=None):
+def git_lines(args, handle, feed=None, env=None):
     """Runs git and hands each line of its output to handle as it arrives, so an output of any size is never held
     whole. feed, if given, is written to git's input from another thread, so neither pipe can fill and stall.
     Fails as run() does, naming only the program."""
     seconds = limit()
     try:
         proc = subprocess.Popen(args, stdin=subprocess.PIPE if feed is not None else subprocess.DEVNULL,
-                                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+                                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, env=env)
     except OSError:
         raise RuntimeError("git could not be started") from None
     if feed is not None:
@@ -2379,8 +2527,9 @@ def line_edits(old_lines, new_lines, repo_dir=None):
                 paths.append(os.path.join(folder, name))
                 with open(paths[-1], "wb") as f:
                     f.write("".join(line + "\n" for line in lines).encode("utf-8", "surrogatepass"))
-            p = subprocess.run(["git", "diff", "--no-index", "--no-color", "-U0", "--no-ext-diff", "--no-textconv",
-                                paths[0], paths[1]], capture_output=True, timeout=min(60, limit()))
+            p = subprocess.run(["git"] + READ_CONFIG + ["diff", "--no-index", "--no-color", "-U0", "--no-ext-diff",
+                                                        "--no-textconv", paths[0], paths[1]],
+                               capture_output=True, timeout=min(60, limit()), env=read_env())
             if p.returncode in (0, 1):
                 edits = []
                 for m in re.finditer(rb"(?m)^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@", p.stdout):
@@ -2404,6 +2553,31 @@ HUNK = re.compile(rb"@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@")
 LINKS = {"160000", "120000"}   # a submodule, and a symbolic link, whose blob is its target's path, not code
 APPROXIMATE = "approximate"    # read_added_code's key for the lines each file version adds that rest on a fallback
 GENERATED_VERSION = ((), ())   # what read_added_code holds for a version of a generated file (see generated_output)
+# read_added_code's key, with a commit's hash, for the lines of code of every file the commit deletes. When git does
+# not pair a deleted file with the file it became (past its rename limit, or edited past its similarity threshold, as
+# a .js file rewritten as .ts is), those lines are what the commit moved (see moved_files).
+DELETED = "deleted"
+ALIKE = "alike"   # read_added_code's key for how alike each watched version's changed lines read (see sweep)
+# A Git LFS pointer: a file kept elsewhere, whose text in the repository is three lines naming it
+LFS_SPECS = (b"https://git-lfs.github.com/spec/v1", b"https://hawser.github.com/spec/v1")
+LFS_LINE = re.compile(rb"version https://(?:git-lfs|hawser)\.github\.com/spec/v1|oid sha256:[0-9a-f]{64}|size [0-9]+|"
+                      rb"ext-[0-9]+-\S+ \S+")
+
+
+def lfs_pointer(lines):
+    """Whether a file version, as its lines (bytes), is a Git LFS pointer, as git-lfs itself decides: under 1,024
+    bytes, a version line naming the pointer spec first, then key and value lines, an oid of sha256 and a size among
+    them. Its lines name a file kept elsewhere; they are no code."""
+    if not lines or not lines[0].startswith(b"version ") or sum(len(line) + 1 for line in lines) >= 1024:
+        return False
+    keys = {}
+    for line in lines:
+        m = re.fullmatch(rb"([a-z0-9.-]+) (\S.*)", line)
+        if not m:
+            return False
+        keys[m.group(1)] = m.group(2)
+    return (keys.get(b"version") in LFS_SPECS and keys.get(b"size", b"").isdigit()
+            and re.fullmatch(rb"sha256:[0-9a-f]{64}", keys.get(b"oid", b"")) is not None)
 
 
 GIT_VERSION = []
@@ -2420,12 +2594,36 @@ def git_version():
     return GIT_VERSION[0]
 
 
-def diff_path(text):
-    """A path from a diff's ---/+++ line, without git's quotes, or None for /dev/null."""
-    path = text.strip('"')   # git quotes a name holding a quote or a tab; the ending survives
-    if path == "/dev/null":
+def diff_path(text, prefix):
+    """A path from a diff's ---/+++ label, unquoted (git_path), or None for /dev/null. git ends a label whose name
+    holds a space with a tab, after the closing quote when there is one; prefix is the a/ or b/ the command gives."""
+    if text.endswith("\t"):
+        text = text[:-1]
+    if text == "/dev/null":
         return None
-    return path[2:] if path.startswith(("a/", "b/")) else path
+    path = git_path(text)
+    return path[len(prefix):] if path.startswith(prefix) else path
+
+
+QUOTED = r'"(?:[^"\\]|\\.)*"'
+
+
+def header_paths(text):
+    """The old and new paths a "diff --git a/x b/y" line names, without their prefixes, or (None, None) where they
+    cannot be told apart for certain: an unquoted name holding a space splits in more than one place, and is read only
+    when both halves name the same file, as they do for every change but a rename or a copy, whose paths the rename
+    and copy lines give exactly."""
+    m = re.match(r"(%s) (.*)$" % QUOTED, text) or re.match(r"([^\"]*) (%s)$" % QUOTED, text)
+    if m:
+        a, b = git_path(m.group(1)), git_path(m.group(2))
+    else:
+        half = len(text) // 2
+        a, b = text[:half], text[half + 1:]
+        if len(text) % 2 == 0 or text[half:half + 1] != " " or a[2:] != b[2:]:
+            return None, None
+    if not (a.startswith("a/") and b.startswith("b/")):
+        return None, None
+    return a[2:], b[2:]
 
 
 def read_added_code(repo_dir):
@@ -2441,16 +2639,45 @@ def read_added_code(repo_dir):
     can be had and the new one cannot be fetched either, each hunk is read alone and its lines are counted under
     APPROXIMATE ({(commit, blob): lines}), as are lines of a Python version its tokenizer could not read. A version
     git calls binary is read whole when its text can be decoded (UTF-16, as Windows tools save scripts), diffed
-    line for line against the version before."""
-    added, where, marked, approximate = {}, {}, set(), {}
-    added[APPROXIMATE] = approximate
+    line for line against the version before.
+
+    A file a commit deletes has its lines of code pooled, as removed lines, under (commit, DELETED), so collect can
+    tell a move git did not pair from new code (see moved_files). A Git LFS pointer holds no code (lfs_pointer). For
+    each commit in SWEEP_WATCH, ALIKE holds how alike each version's changed lines read, {(commit, blob): share}
+    (see sweep). Paths are read exactly, whatever they hold (diff_path, header_paths)."""
+    added, where, marked, approximate, similar = {}, {}, set(), {}, {}
+    added[APPROXIMATE], added[ALIKE] = approximate, similar
     versions = Versions(repo_dir)
+    watch = set(SWEEP_WATCH)
     state = {"sha": None, "merge": False, "file": None, "header": False, "hunk": None, "side": None}
+
+    def paths(f):
+        """The file's old and new paths, None where it has none (created, or deleted): from its ---/+++ labels, or,
+        where it has none (a binary file), from its rename or copy lines and its diff --git line, and last from its
+        Binary files line, where a name holding " and " could be misread."""
+        if f["labels"]:
+            return
+        old, new = f["from"] or f["git_paths"][0], f["to"] or f["git_paths"][1]
+        if (old is None or new is None) and f["binary_line"]:
+            m = re.match(r"Binary files (.*) and (.*) differ$", f["binary_line"])
+            if m:
+                old, new = old or diff_path(m.group(1), "a/"), new or diff_path(m.group(2), "b/")
+        f["old_path"] = None if f["created"] else old
+        f["new_path"] = None if f["deleted"] else new
 
     def finish():
         f = state["file"]
         state["file"] = None
-        if f is None or f["new_blob"] is None or f["mode"] in LINKS or not f["new_path"]:
+        if f is None:
+            return
+        paths(f)
+        if f["mode"] in LINKS:
+            return
+        if not f["new_path"]:   # a file deleted: its lines are what the commit may have moved
+            if f["old_path"] and f["old_blob"] and f["old_blob"].strip("0") and not state["merge"]:
+                deleted(f)
+            return
+        if f["new_blob"] is None:
             return
         path = f["new_path"]
         lang = language_of(path)
@@ -2460,16 +2687,53 @@ def read_added_code(repo_dir):
             hold(f, lang)
             return
         key = (state["sha"], f["new_blob"])
-        got = version_lines(f, lang)
+        got = version_lines(f, lang, [] if state["sha"] in watch else None)
         if got is None:
             return
-        plus, minus, rough, head = got
+        plus, minus, rough, head, pairs = got
         added[key] = (plus, minus)
         where[key] = path
         if rough:
             approximate[key] = rough
         if head:
             marked.add(path)
+        if pairs is not None:
+            share = alike_share(pairs)
+            similar[key] = (0.0 if plus else 1.0) if share is None else share
+
+    def deleted(f):
+        """A deleted file's lines of code, added to its commit's (commit, DELETED): read from the whole version where
+        it can be had, and from the diff's own lines otherwise."""
+        path = f["old_path"]
+        lang = language_of(path)
+        if not counts_as_code(path, lang):
+            return
+        reader, rkey = reader_for(lang, path)
+        old = None if f["binary"] else versions.get(f["old_blob"])
+        texts = []
+        if old is not None:
+            if not lfs_pointer(old.lines):
+                kinds, get = reading_of(old, reader, rkey)[0], old.text()
+                texts = [get(i) for i in range(len(old.lines)) if kinds[i] == CODE]
+        else:
+            data = versions.cat.get(f["old_blob"])
+            text = text_of(data) if data is not None else None
+            if text is not None:   # decoded whole (UTF-16), unless it is a pointer
+                if not (data.startswith(b"version ") and lfs_pointer(split_lines(data, b"\n")[0])):
+                    lines, eol = split_lines(text, "\n")
+                    kinds = read_lines(reader, lines.__getitem__, len(lines), eol)[0]
+                    texts = [lines[i] for i in range(len(lines)) if kinds[i] == CODE]
+            elif not f["binary"] and not all(LFS_LINE.fullmatch(line) for h in f["hunks"] for line in h[4]):
+                rd = reader.fallback or reader
+                st = rd.initial
+                for h in f["hunks"]:
+                    for line in h[4]:
+                        t = line.decode("utf-8", "replace")
+                        kind, st = rd.read(t, st)
+                        if kind == CODE:
+                            texts.append(t)
+        pooled = added.setdefault((state["sha"], DELETED), (array("q"), array("q")))
+        pooled[1].extend(line_hash(t) for t in texts)
 
     def hold(f, lang):
         """A merge's version of a file, made from its first parent's as a commit's is, so a commit after the merge
@@ -2491,15 +2755,16 @@ def read_added_code(repo_dir):
             return
         versions.put(f["new_blob"], new)
 
-    def version_lines(f, lang):
-        """(added lines' hashes, removed lines', how many added lines rest on a fallback, whether generated)."""
+    def version_lines(f, lang, pairs):
+        """(added lines' hashes, removed lines', how many added lines rest on a fallback, whether generated, and, when
+        pairs is a list, each hunk's removed and added lines of code with their spacing collapsed, for sweep)."""
         reader, rkey = reader_for(lang, f["new_path"])
         old_path = f["old_path"] or f["new_path"]
         old_lang = language_of(old_path) or lang
         old_reader, okey = reader_for(old_lang, old_path) if old_path != f["new_path"] else (reader, rkey)
         blank_old = not f["old_blob"] or not f["old_blob"].strip("0")
         if f["binary"]:
-            return binary_lines(f, lang, reader, rkey, old_reader, okey, blank_old)
+            return binary_lines(f, lang, reader, rkey, old_reader, okey, blank_old, pairs)
         old = Version([], False) if blank_old else versions.get(f["old_blob"])
         made = applied(old, f["hunks"]) if old is not None else None
         if made is not None and blob_id(made[0], made[1], f["new_blob"]) != f["new_blob"]:
@@ -2507,7 +2772,7 @@ def read_added_code(repo_dir):
         if made is None:
             data = versions.cat.get(f["new_blob"])
             if data is None or b"\x00" in data[:8000]:
-                return hunk_lines(f, reader, old_reader)
+                return hunk_lines(f, reader, old_reader, pairs)
             new = Version(*split_lines(data, b"\n"))
             edits = None
         else:
@@ -2523,62 +2788,79 @@ def read_added_code(repo_dir):
                     pass
         kinds, _, exact = reading_of(new, reader, rkey)
         versions.put(f["new_blob"], new)
+        # a Git LFS pointer, old or new, adds and removes no line of code
+        new_pointer = lfs_pointer(new.lines)
+        old_pointer = (lfs_pointer(old.lines) if old is not None
+                       else any(h[4] for h in f["hunks"]) and all(LFS_LINE.fullmatch(line)
+                                                                  for h in f["hunks"] for line in h[4]))
         plus, minus, rough = array("q"), array("q"), 0
         old_kinds = old_get = None
         for h, (a, b, c, d) in zip(f["hunks"], edits or ()):
-            first = c
+            first, came, gone = c, [], []
             if h[6] and h[4] and h[5] and h[5][0].rstrip(b"\r") == h[4][-1].rstrip(b"\r"):
                 first, b = c + 1, b - 1   # the old last line only gained its line end: not removed, not written
-            for i in range(first, d):
+            for i in range(first, d if not new_pointer else first):
                 if kinds[i] == CODE:
-                    plus.append(line_hash(get(i)))
+                    came.append(get(i))
                     rough += not exact
-            if b > a:
+            if b > a and not old_pointer:
                 if old_kinds is None:
                     old_get, old_kinds = old.text(), reading_of(old, old_reader, okey)[0]
-                for i in range(a, b):
-                    if old_kinds[i] == CODE:
-                        minus.append(line_hash(old_get(i)))
+                gone = [old_get(i) for i in range(a, b) if old_kinds[i] == CODE]
+            plus.extend(line_hash(t) for t in came)
+            minus.extend(line_hash(t) for t in gone)
+            if pairs is not None:
+                pairs.append(([" ".join(t.split()) for t in gone], [" ".join(t.split()) for t in came]))
         if edits is None:   # the new version read whole, as fetched: its added lines are the hunks' own
-            for old_start, old_count, new_start, new_count, gone, came, _, _ in f["hunks"]:
+            for old_start, old_count, new_start, new_count, gone_lines, _, _, _ in f["hunks"]:
+                came, gone = [], []
                 c = new_start - 1 if new_count else new_start
-                for i in range(c, min(c + new_count, n)):
+                for i in range(c, min(c + new_count, n) if not new_pointer else c):
                     if kinds[i] == CODE:
-                        plus.append(line_hash(get(i)))
+                        came.append(get(i))
                         rough += not exact
                 reader_old = old_reader.fallback or old_reader
                 st = reader_old.initial if old_start <= 1 else reader_old.middle
-                for line in gone:
+                for line in gone_lines if not old_pointer else ():
                     text = line.decode("utf-8", "replace")
                     kind, st = reader_old.read(text, st)
                     if kind == CODE:
-                        minus.append(line_hash(text))
+                        gone.append(text)
+                plus.extend(line_hash(t) for t in came)
+                minus.extend(line_hash(t) for t in gone)
+                if pairs is not None:
+                    pairs.append(([" ".join(t.split()) for t in gone], [" ".join(t.split()) for t in came]))
         # a version's first lines are read for a generator's mark unless they are the version before's, at its path
         fresh_head = edits is None or blank_old or old_path != f["new_path"] or any(c < GEN_HTML_LINES
                                                                                     for a, b, c, d in edits)
-        return plus, minus, rough, fresh_head and generated_head(get, n, lang)
+        return plus, minus, rough, fresh_head and generated_head(get, n, lang), pairs
 
-    def hunk_lines(f, reader, old_reader):
+    def hunk_lines(f, reader, old_reader, pairs):
         """Each hunk read alone, from where a file starts when the hunk does and from plain code otherwise: the
-        approximation when no whole version can be had."""
+        approximation when no whole version can be had. A side whose every line is a Git LFS pointer's is none."""
         plus, minus, rough, head = array("q"), array("q"), 0, False
         lang = language_of(f["new_path"])
+        pointer = [all(LFS_LINE.fullmatch(line) for h in f["hunks"] for line in h[k]) for k in (4, 5)]
         for old_start, old_count, new_start, new_count, gone, came, _, _ in f["hunks"]:
-            for lines, start, into, rd in ((came, new_start, plus, reader), (gone, old_start, minus, old_reader)):
+            texts = ([], [])   # removed, added
+            for lines, start, side, rd in ((came, new_start, 1, reader), (gone, old_start, 0, old_reader)):
                 rd = rd.fallback or rd
                 st = rd.initial if start <= 1 else rd.middle
-                for n, line in enumerate(lines, start):
+                for n, line in enumerate(lines if not pointer[side] else (), start):
                     text = line.decode("utf-8", "replace")
                     kind, st = rd.read(text, st)
                     if kind == CODE:
-                        into.append(line_hash(text))
-                        if into is plus:
-                            rough += 1
-                    if into is plus and n <= GEN_HTML_LINES and generated_line(text, lang, n):
+                        texts[side].append(text)
+                    if side and n <= GEN_HTML_LINES and generated_line(text, lang, n):
                         head = True
-        return plus, minus, rough, head
+            plus.extend(line_hash(t) for t in texts[1])
+            minus.extend(line_hash(t) for t in texts[0])
+            rough += len(texts[1])
+            if pairs is not None:
+                pairs.append(tuple([" ".join(t.split()) for t in side] for side in texts))
+        return plus, minus, rough, head, pairs
 
-    def binary_lines(f, lang, reader, rkey, old_reader, okey, blank_old):
+    def binary_lines(f, lang, reader, rkey, old_reader, okey, blank_old, pairs):
         """A version git calls binary, read as text when it decodes as text (text_of)."""
         data = versions.cat.get(f["new_blob"])
         new_text = text_of(data) if data is not None else None
@@ -2592,14 +2874,14 @@ def read_added_code(repo_dir):
         old_kinds = read_lines(old_reader, old_lines.__getitem__, len(old_lines), old_eol)[0] if old_lines else b""
         plus, minus, rough = array("q"), array("q"), 0
         for a, b, c, d in line_edits(old_lines, new_lines, repo_dir):
-            for i in range(c, d):
-                if kinds[i] == CODE:
-                    plus.append(line_hash(new_lines[i]))
-                    rough += not exact
-            for i in range(a, b):
-                if old_kinds[i] == CODE:
-                    minus.append(line_hash(old_lines[i]))
-        return plus, minus, rough, generated_head(new_lines.__getitem__, len(new_lines), lang)
+            came = [new_lines[i] for i in range(c, d) if kinds[i] == CODE]
+            gone = [old_lines[i] for i in range(a, b) if old_kinds[i] == CODE]
+            plus.extend(line_hash(t) for t in came)
+            minus.extend(line_hash(t) for t in gone)
+            rough += 0 if exact else len(came)
+            if pairs is not None:
+                pairs.append(([" ".join(t.split()) for t in gone], [" ".join(t.split()) for t in came]))
+        return plus, minus, rough, generated_head(new_lines.__getitem__, len(new_lines), lang), pairs
 
     def handle(stream):
         s = state
@@ -2613,7 +2895,9 @@ def read_added_code(repo_dir):
                 finish()
                 s.update(header=True, hunk=None, side=None,
                          file={"old_blob": None, "new_blob": None, "old_path": None, "new_path": None, "mode": None,
-                               "binary": False, "hunks": []})
+                               "binary": False, "hunks": [], "labels": False, "created": False, "deleted": False,
+                               "from": None, "to": None, "binary_line": None,
+                               "git_paths": header_paths(raw[11:].decode("utf-8", "replace").rstrip("\n"))})
                 continue
             f = s["file"]
             if f is None:
@@ -2630,18 +2914,20 @@ def read_added_code(repo_dir):
                             f["old_blob"], f["new_blob"] = ids
                         if len(fields) > 1:
                             f["mode"] = fields[1]
-                    elif line.startswith(("new file mode ", "new mode ")):
+                    elif line.startswith(("new file mode ", "new mode ", "deleted file mode ")):
                         f["mode"] = line.split()[-1]
+                        f["created"] = f["created"] or line.startswith("new file")
+                        f["deleted"] = f["deleted"] or line.startswith("deleted")
+                    elif line.startswith(("rename from ", "copy from ")):
+                        f["from"] = git_path(line.split(" ", 2)[2])
+                    elif line.startswith(("rename to ", "copy to ")):
+                        f["to"] = git_path(line.split(" ", 2)[2])
                     elif line.startswith("--- "):
-                        f["old_path"] = diff_path(line[4:])
+                        f["old_path"], f["labels"] = diff_path(line[4:], "a/"), True
                     elif line.startswith("+++ "):
-                        f["new_path"] = diff_path(line[4:])
+                        f["new_path"], f["labels"] = diff_path(line[4:], "b/"), True
                     elif line.startswith("Binary files "):
-                        f["binary"] = True
-                        if f["new_path"] is None:   # git names the paths only here: "Binary files a/x and b/y differ"
-                            m = re.match(r"Binary files (.*) and (.*) differ$", line)
-                            if m:
-                                f["old_path"], f["new_path"] = diff_path(m.group(1)), diff_path(m.group(2))
+                        f["binary"], f["binary_line"] = True, line
                     continue
             if raw.startswith(b"@@"):
                 m = HUNK.match(raw)
@@ -2668,9 +2954,10 @@ def read_added_code(repo_dir):
     # their first parents (git 2.31 and later), only to make their versions (see hold); an older git leaves them out.
     merges = ["--diff-merges=first-parent"] if git_version() >= (2, 31) else ["--no-merges"]
     try:
-        git_lines(["git", "-C", repo_dir, "-c", "core.quotepath=off", "log", "--exclude=refs/heads/gh-pages", "--all"]
+        git_lines(["git", "-C", repo_dir] + READ_CONFIG + ["log", "--exclude=refs/heads/gh-pages", "--all"]
                   + merges + ["--reverse", "--topo-order", "-M", "-p", "-U0", "--full-index", "--no-color",
-                              "--no-ext-diff", "--no-textconv", "--format=%x00%H %P"], handle)
+                              "--no-ext-diff", "--no-textconv", "--src-prefix=a/", "--dst-prefix=b/",
+                              "--format=%x00%H %P"], handle, env=read_env())
     finally:
         versions.cat.close()
     if marked:
@@ -2702,8 +2989,9 @@ def attributed(repo_dir, source, paths):
                 found.add(items[k].decode("utf-8", "replace"))
 
     try:
-        git_lines(["git", "-C", repo_dir, "check-attr", "--source=" + source, "-z", "--stdin"] + list(LINGUIST), handle,
-                  feed="".join(p + "\x00" for p in paths).encode("utf-8", "surrogateescape"))
+        git_lines(["git", "-C", repo_dir] + READ_CONFIG + ["check-attr", "--source=" + source, "-z", "--stdin"]
+                  + list(LINGUIST), handle, feed="".join(p + "\x00" for p in paths).encode("utf-8", "surrogateescape"),
+                  env=read_env())
     except RuntimeError:
         return None
     return found
@@ -2715,11 +3003,12 @@ def attributed_versions(repo_dir, commits):
     A commit holds the attributes of the last commit before it, along its first parents, that changed a .gitattributes
     file; commits of a repository whose .gitattributes never mention linguist attributes are read no further."""
     try:
-        blobs = run(["git", "-C", repo_dir, "log", "--all", "--format=", "--raw", "--no-renames", "--no-abbrev",
-                     "--", ":(glob)**/.gitattributes"], timeout=limit()).decode("utf-8", "replace")
+        blobs = run(["git", "-C", repo_dir] + READ_CONFIG + ["log", "--all", "--format=", "--raw", "--no-renames",
+                                                             "--no-abbrev", "--", ":(glob)**/.gitattributes"],
+                    timeout=limit(), env=read_env()).decode("utf-8", "replace")
     except RuntimeError:
         return None
-    ids = sorted({line.split()[3] for line in blobs.splitlines() if line.startswith(":") and len(line.split()) > 4}
+    ids = sorted({line.split()[3] for line in blobs.split("\n") if line.startswith(":") and len(line.split()) > 4}
                  - {"0" * 40, "0" * 64})
     if not ids:
         return set()
@@ -2745,8 +3034,9 @@ def attributed_versions(repo_dir, commits):
                 if re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", text):
                     changed.add(text)
 
-        git_lines(["git", "-C", repo_dir, "diff-tree", "--stdin", "--root", "-r", "--name-only", "--",
-                   ":(glob)**/.gitattributes"], touched, feed=feed.encode())
+        git_lines(["git", "-C", repo_dir] + READ_CONFIG + ["diff-tree", "--stdin", "--root", "-r", "--name-only", "--",
+                                                          ":(glob)**/.gitattributes"], touched, feed=feed.encode(),
+                  env=read_env())
     except RuntimeError:
         return None
     source = {}
@@ -2773,15 +3063,46 @@ def attributed_versions(repo_dir, commits):
     return marked
 
 
+class Standing:
+    """The lines of code standing at a head, one entry a line in the order they were read, a few bytes a line where a
+    Counter of (line_hash, test) held a tuple and an entry for each: hashes, each line's line_hash; tests, 1 where it
+    is test code; rough, 1 where a fallback read it (a Python file its tokenizer could not read, a Rust file whose
+    test scopes could not be read). unattributed is True when .gitattributes could not be read. items() gives the lines
+    as a Counter of (line_hash, whether test code) would."""
+    __slots__ = ("hashes", "tests", "rough", "unattributed")
+
+    def __init__(self):
+        self.hashes, self.tests, self.rough, self.unattributed = array("q"), bytearray(), bytearray(), False
+
+    def __len__(self):
+        return len(self.hashes)
+
+    def add(self, rows, rough):
+        """rows: (line_hash, whether test code) for each line; rough: whether a fallback read them."""
+        for h, t in rows:
+            self.hashes.append(h)
+            self.tests.append(1 if t else 0)
+        self.rough.extend(bytes([1 if rough else 0]) * len(rows))
+
+    def items(self):
+        return Counter(zip(self.hashes, map(bool, self.tests))).items()
+
+
 def read_head_code(repo_dir):
     """The lines of code on the default branch as it stands, read whole file by whole file with the readers the
-    history is read with, so a line reads alike in both: a Counter of (line_hash, whether it is test code). Rust code
-    compiled only in tests counts as test code, wherever its file is: inline (rust_lines), or in the file of a module
-    declared so out of line (rust_test_files, with the crate roots the repository's Cargo.toml files name).
-    Left out: what counts_as_code leaves out, symbolic links and submodules, generated files (generated_output), and
-    the paths the default branch's .gitattributes marks (attributed). Its attribute approximate counts the lines, of
-    each key, read by a fallback (a Python file its tokenizer could not read, a Rust file whose test scopes could
-    not be read); its attribute unattributed is True when .gitattributes could not be read."""
+    history is read with, so a line reads alike in both (see Standing). Rust code compiled only in tests counts as
+    test code, wherever its file is: inline (rust_lines), or in the file of a module declared so out of line
+    (rust_test_files, with the crate roots the repository's Cargo.toml files name). Left out: what counts_as_code
+    leaves out, symbolic links and submodules, Git LFS pointers, generated files (generated_output), and the paths the
+    default branch's .gitattributes marks (attributed). An empty repository, or one whose HEAD names no branch, has
+    nothing standing at its head; a head that cannot be read for any other reason raises RuntimeError."""
+    head = Standing()
+    try:
+        run(["git", "-C", repo_dir, "rev-parse", "--quiet", "--verify", "HEAD^{tree}"])
+    except RuntimeError as e:
+        if "exited" not in str(e):   # out of time, or git could not start: the head is unknown, not missing
+            raise
+        return head
     listing = run(["git", "-C", repo_dir, "ls-tree", "-r", "-z", "--full-tree", "HEAD"]).decode("utf-8", "replace")
     files, manifests = [], []
     for item in listing.split("\x00"):
@@ -2793,8 +3114,6 @@ def read_head_code(repo_dir):
             files.append((fields[2], path, lang))
         elif blob and path.rpartition("/")[2] == "Cargo.toml":
             manifests.append((fields[2], path))
-    head, rough = Counter(), Counter()
-    head.approximate, head.unattributed = rough, False
     if not files:
         return head
     skip = attributed(repo_dir, "HEAD", {p for _, p, _ in files})
@@ -2804,7 +3123,7 @@ def read_head_code(repo_dir):
     if not any(lang == "Rust" for _, _, lang in files):
         manifests = []
     web, marked = {}, set()   # each HTML, CSS and JavaScript file's lines, kept until the sites are known
-    rust, declared, roots = {}, [], set()   # each Rust file's test flag and production lines; see rust_test_files
+    rust, declared, roots = {}, [], set()   # each Rust file's test flag and place in head; see rust_test_files
 
     def handle(stream):
         for blob, path, lang in files:
@@ -2814,7 +3133,7 @@ def read_head_code(repo_dir):
             body = stream.read(int(header[2]))
             stream.read(1)
             text = text_of(body)
-            if text is None:
+            if text is None or body.startswith(b"version ") and lfs_pointer(split_lines(body, b"\n")[0]):
                 continue
             # lines end at \n alone, as in the diffs read_added_code reads, so a line holding a form feed or U+2028
             # is one line in both and its text matches (splitlines would cut it in two)
@@ -2822,7 +3141,6 @@ def read_head_code(repo_dir):
             if generated_head(lines.__getitem__, len(lines), lang):
                 marked.add(path)
                 continue
-            into = web.setdefault(path, Counter()) if lang in WEB_OUTPUT else head
             test = is_test(path, lang)
             reader = reader_for(lang, path)[0]
             rows = None
@@ -2838,13 +3156,13 @@ def read_head_code(repo_dir):
                 kinds, _, exact = read_lines(reader, lines.__getitem__, len(lines), eol)
                 rows = [(line_hash(t), test) for t, kind in zip(lines, kinds) if kind == CODE]
                 exact = exact and lang != "Rust"
-            for h, t in rows:
-                into[(h, t)] += 1
-            if not exact:
-                for h, t in rows:
-                    rough[(h, t)] += 1
+            if lang in WEB_OUTPUT:
+                web[path] = (rows, not exact)
+                continue
+            start = len(head)
+            head.add(rows, not exact)
             if lang == "Rust":
-                rust[path] = (test, array("q", (h for h, t in rows if not t)))
+                rust[path] = (test, start, len(head))
         for blob, path in manifests:
             header = stream.readline().split()
             if len(header) < 3:
@@ -2856,15 +3174,12 @@ def read_head_code(repo_dir):
     git_lines(["git", "-C", repo_dir, "cat-file", "--batch"], handle,
               feed="".join(blob + "\n" for blob in [f[0] for f in files] + [m[0] for m in manifests]).encode())
     output = generated_output(set(web), marked) if marked else set()
-    for path, standing in web.items():
+    for path, (rows, rough) in web.items():
         if path not in output:
-            head.update(standing)
-    for path in rust_test_files({p: t for p, (t, _) in rust.items()}, declared, roots):
-        for h in rust[path][1]:   # a module compiled only in tests: its production lines are test code
-            head[(h, False)] -= 1
-            head[(h, True)] += 1
-            if not head[(h, False)]:
-                del head[(h, False)]
+            head.add(rows, rough)
+    for path in rust_test_files({p: t for p, (t, _, _) in rust.items()}, declared, roots):
+        _, start, end = rust[path]   # a module compiled only in tests: its production lines are test code
+        head.tests[start:end] = b"\x01" * (end - start)
     return head
 
 
@@ -3181,6 +3496,109 @@ def move_credit(pool, added, sha, files):
         pool.update((h, kind) for h in plus[:moved])
 
 
+# A file a commit adds is taken as moved from one it deletes, where git did not pair the two (see DELETED), when the
+# commit deletes a file of the same name but for its folder and extension (f.js rewritten as f.ts), or when at least
+# MOVED_SHARE of its lines of code are among the lines of code the deleted files held, as at least half of a file's
+# content is what git's own rename detection asks for. A moved file adds only the lines it changed, and is no new
+# file for the import rule; a new file beside an unrelated deletion shares only lines as common as a lone closing
+# brace, and keeps every line it adds.
+MOVED_SHARE = 0.5
+# An existing codebase uploaded in parts (github.com takes 100 files an upload): an author's run of commits to one
+# repository, each adding at least IMPORT_CHUNK new files of code within IMPORT_GAP seconds of the one before, that
+# adds more than IMPORT_FILES in all is an import, as one commit of that size is. A busy day of small commits is not.
+IMPORT_CHUNK, IMPORT_GAP = 50, 3600
+
+
+def stem_of(path):
+    """A file's name without its folder or extension, folded: what a move that also converts a file keeps."""
+    return os.path.splitext(path.replace("\\", "/").rpartition("/")[2])[0].lower()
+
+
+def moved_files(c, added):
+    """The paths of the files commit c adds that it moved from files it deletes (see MOVED_SHARE), judged by their
+    lines of code where the diffs were read (added), and by their names alone where they were not."""
+    code = lambda f: counts_as_code(f.path, language_of(f.path))   # noqa: E731
+    adds = [f for f in c.files if f.status == "A" and code(f)]
+    stems = {stem_of(f.path) for f in c.files if f.status == "D" and code(f)}
+    if not adds or not stems:
+        return set()
+    gone = Counter(added.get((c.sha, DELETED), NO_LINES)[1]) if added is not None else Counter()
+    moved = set()
+    for f in adds:
+        plus = added.get((c.sha, f.blob), NO_LINES)[0] if added is not None else ()
+        if stem_of(f.path) in stems or plus and sum(min(n, gone[h]) for h, n in Counter(plus).items()) >= (
+                MOVED_SHARE * len(plus)):
+            moved.add(f.path)
+    return moved
+
+
+def moved_out(plus, gone):
+    """plus without the lines found in gone, a Counter of the lines of code a commit's deleted files held, each
+    matched once: what a moved file changed."""
+    kept = array("q")
+    for h in plus:
+        if gone[h] > 0:
+            gone[h] -= 1
+        else:
+            kept.append(h)
+    return kept
+
+
+def new_code_files(c, added, theirs, moved, files=None):
+    """The files of code commit c brings in new, for the import rule: added, not moved (moved_files), not marked by
+    the repository's .gitattributes (theirs), and not generated; of files when given, else of all its files."""
+    return [f for f in (c.files if files is None else files)
+            if f.status == "A" and f.added is not None and f.path not in moved and (c.sha, f.path) not in theirs
+            and counts_as_code(f.path, language_of(f.path))
+            and (added is None or added.get((c.sha, f.blob)) is not GENERATED_VERSION)]
+
+
+def import_runs(commits, new_files):
+    """The hashes of the commits that bring in a codebase in parts (see IMPORT_CHUNK): new_files(c) is how many new
+    files of code commit c adds. A commit of the author's own adding fewer ends the run."""
+    found, runs = set(), {}
+    for c in sorted(commits, key=lambda c: (c.repo, c.email, c.ts)):
+        new, key = new_files(c), (c.repo, c.email)
+        now = runs.get(key)
+        if new < IMPORT_CHUNK:
+            runs.pop(key, None)
+            continue
+        if now is None or c.ts - now["last"] > IMPORT_GAP:
+            now = runs[key] = {"shas": [], "files": 0, "last": c.ts}
+        now["shas"].append(c.sha)
+        now["files"] += new
+        now["last"] = c.ts
+        if now["files"] > IMPORT_FILES:
+            found.update(now["shas"])
+    return found
+
+
+def change_of(c, added):
+    """The lines of code a commit's diff adds, and those it removes, as one set, or None where its repository's
+    diffs could not be read: what tells one change landed twice from two changes that only share an author, an author
+    second and a subject."""
+    if added is None:
+        return None
+    lines = set()
+    for key in [(c.sha, f.blob) for f in c.files] + [(c.sha, DELETED)]:
+        plus, minus = added.get(key, NO_LINES)
+        lines.update((True, h) for h in plus)
+        lines.update((False, h) for h in minus)
+    return lines
+
+
+def same_change(a, b):
+    """Whether two commits under one author, author second and subject are one change landed twice (a cherry-pick, a
+    rebase, an amend), by their changes (change_of): yes when either's is unknown, as its repository's diffs could not
+    be read, and when neither changes a line of code; no when only one does; otherwise yes when they share at least
+    half of the smaller one's lines, as an amend that changed a line still does."""
+    if a is None or b is None:
+        return True
+    if not a or not b:
+        return not a and not b
+    return 2 * len(a & b) >= min(len(a), len(b))
+
+
 def collect(owner, repos, work, since=None):
     """Every counted file version as (time, language, lines of code), oldest first, plus the times of the
     owner's commits and of skipped imports, over the whole history; the window is applied afterwards. A file
@@ -3199,40 +3617,65 @@ def collect(owner, repos, work, since=None):
     no commits, and their file versions count as seen, so no later commit is credited with them. A commit
     held by more than one repository, as in a fork or a mirror, counts once, and so does one change landed
     twice under new hashes (a cherry-pick, a rebase with the branch kept, an amend still reachable from a
-    tag), known by its author's address, author time and subject. File versions another account wrote,
-    from the template a repository was made from or from coderprint itself in a relay copy, count as seen
-    before anything is read; a commit that adds nothing else is not the owner's work and does not count. A
-    repository that cannot be read, even on a second try, is left out and counted in "unread". The file versions a
-    repository's .gitattributes marks as vendored, generated or documentation (attributed_versions) count nowhere,
-    and neither do generated files (generated_output).
+    tag), known by its author's address, author time and subject and by sharing most of its lines of code (see
+    same_change): different changes that only share the first three, one message committed in several repositories
+    at once, both count. Commits of one author second are read parent first, as git lists them (read_commits).
+    File versions another account wrote, from the template a repository was made from or from coderprint itself
+    in a relay copy, count as seen before anything is read; a commit that adds nothing else is not the owner's work
+    and does not count. A repository that cannot be read, even on a second try, is left out and counted in "unread".
+    The file versions a repository's .gitattributes marks as vendored, generated or documentation
+    (attributed_versions) count nowhere, and neither do generated files (generated_output). A version that counts is
+    taken before the same content under a path that does not, in one commit (src/ beside dist/). A file moved to a
+    new name while being edited, which git reports as deleted and added past its rename limit or similarity
+    threshold, adds only what it changed (moved_files). An import, of more than IMPORT_FILES new files of code in
+    one commit or in a run of commits (import_runs), adds no lines.
 
-    code["approximate"] lists (time, lines) for the lines written whose reading rests on a fallback (see
-    read_added_code), numstat's counts for a repository whose diffs cannot be read among them, and
-    code["approximate_in_use"] the lines in use read so; code["attributes_unread"] counts the repositories whose
-    .gitattributes git could not read."""
+    An empty repository, or one of tags alone, has nothing to read. A repository whose head cannot be read still
+    counts what its diffs add, and adds nothing in use (code["heads_unread"]); one whose diffs cannot be read adds
+    nothing in use either. code["approximate"] lists (time, lines) for the lines written whose reading rests on a
+    fallback (see read_added_code), numstat's counts for a repository whose diffs cannot be read among them, and
+    code["approximate_in_use"] the lines in use read so, code["approximate_imports"] the lines of imports counted by
+    numstat; code["attributes_unread"] counts the repositories whose .gitattributes git could not read."""
     all_commits, mismatched, unread, ignore = [], 0, 0, set()
     code, head = {}, {}   # by repository: what each file version adds, and what stands at the head
     skip, attributes_unread = {}, 0   # by repository: the (commit, path) its .gitattributes marks as not its own
+    order = {}   # (repository, commit): its place in git's listing, children first (see read_commits)
     for i, r in enumerate(repos):
         if r.get("isDisabled") or r.get("isLocked"):
             continue   # counted in the listing, never cloned
         dest = slot(work, owner, r["name"])
         try:
             commits, bad, sweeps = read_repository(owner, r["name"], dest, i)
-            try:   # while the clone is still on disk
-                code[i], head[i] = read_added_code(dest), read_head_code(dest)
-            except RuntimeError:
-                code[i], head[i] = None, None
-            marked = attributed_versions(dest, commits)
+            marked = attributed_versions(dest, commits) if commits else set()
+            skip[i] = marked or set()
+            if commits:   # read while the clone is still on disk; each apart, so a head that cannot be read costs
+                # no diffs. read_added_code pairs the changed lines of the commits that could be sweeps (see sweep).
+                SWEEP_WATCH.clear()
+                SWEEP_WATCH.update(c.sha for c in commits if could_sweep([f for f in c.files if f.added is not None
+                                                                          and language_of(f.path)
+                                                                          and (c.sha, f.path) not in skip[i]]))
+                try:
+                    code[i] = read_added_code(dest)
+                except RuntimeError:
+                    code[i] = None
+                finally:
+                    SWEEP_WATCH.clear()
+                try:
+                    head[i] = read_head_code(dest)
+                except RuntimeError:
+                    head[i] = None
+            else:   # an empty repository, or one of tags alone: read, and nothing in it
+                code[i], head[i] = {}, Standing()
             if marked is None or getattr(head[i], "unattributed", False):
                 attributes_unread += 1
-            skip[i] = marked or set()
         except RuntimeError:
             unread += 1
             continue
         finally:
             if not os.environ.get("CLONE_CACHE") and os.path.isdir(dest):
                 remove_tree(dest)   # one clone on disk at a time
+        for k, c in enumerate(commits):
+            order[(i, c.sha)] = k
         all_commits += commits
         mismatched += bad
         ignore |= sweeps
@@ -3243,53 +3686,78 @@ def collect(owner, repos, work, since=None):
         seeded |= seed_blobs(full_name, os.path.join(work, "seed-%d.git" % k)) or set()
     mine = authorship(owner, all_commits, owner_identity(owner), repos)
 
-    seen, shas, keys = set(seeded), set(), set()
-    events, commit_times, import_times, import_lines, approximate = [], [], [], [], []
+    moves = {}   # (repository, commit): the paths of the files it moved (moved_files)
+
+    def moved(c):
+        if (c.repo, c.sha) not in moves:
+            moves[(c.repo, c.sha)] = moved_files(c, code.get(c.repo))
+        return moves[(c.repo, c.sha)]
+
+    parts = import_runs([c for c in all_commits if not c.bot], lambda c: len(new_code_files(
+        c, code.get(c.repo), skip.get(c.repo) or (), moved(c))))
+    twins = {k for k, n in Counter((c.email, c.ts, c.subject) for c in all_commits).items() if n > 1}
+    seen, shas, keys = set(seeded), set(), {}   # keys: (address, author time, subject) -> each landing's change
+    events, commit_times, import_times, import_lines, approximate, rough_imports = [], [], [], [], [], []
     left_out = Counter()
     pool = Counter()   # the lines of code counted as written in the window, in every repository, by line_hash and
     # whether the file they were written in is test code
     holding, writing = set(), set()   # repositories with any file version, and with one not another's
-    for c in sorted(all_commits, key=lambda c: (c.ts, c.repo, c.sha)):
+    # commits of one second parent first: a sweep read before the lines it rewrites would hand on nothing
+    for c in sorted(all_commits, key=lambda c: (c.ts, c.repo, -order[(c.repo, c.sha)])):
         if c.sha in shas:
             continue
         shas.add(c.sha)
         live = [f for f in c.files if f.status != "D" and not f.blob.startswith("0000000")]
         fresh = [f for f in live if f.blob not in seen]
         key = (c.email, c.ts, c.subject)
+        added = code.get(c.repo)
+        change = change_of(c, added) if key in twins else None
         copied = bool(live) and all(f.blob in seeded for f in live)
         if live:
             holding.add(c.repo)
             if not copied:
                 writing.add(c.repo)
         why = ("automation" if c.bot else "others" if mine is not None and (c.repo, c.email) not in mine
-               else "copied" if copied else "landed_twice" if key in keys else None)
+               else "copied" if copied
+               else "landed_twice" if any(same_change(change, other) for other in keys.get(key, ())) else None)
         if why:   # seen all the same, so no later commit is credited with this content
             seen.update(f.blob for f in fresh)
             left_out[why] += 1
             continue
-        keys.add(key)
+        keys.setdefault(key, []).append(change)
         commit_times.append(c.ts)
         theirs = skip.get(c.repo) or ()
-        added = code.get(c.repo)
         counted = [f for f in fresh if f.added is not None and language_of(f.path) and (c.sha, f.path) not in theirs]
-        # the import rule counts files of code only: prose, data and generated files are not code (see IMPORT_FILES)
+        # the import rule counts new files of code only: prose, data, generated files and files moved from ones the
+        # commit deletes are not new code (see IMPORT_FILES and moved_files)
         code_files = [f for f in counted if counts_as_code(f.path, language_of(f.path))
                       and (added is None or added.get((c.sha, f.blob)) is not GENERATED_VERSION)]
-        brought = c.sha not in ignore and sum(1 for f in code_files if f.status == "A") > IMPORT_FILES
+        brought = c.sha not in ignore and (c.sha in parts or len(new_code_files(c, added, theirs, moved(c), counted))
+                                           > IMPORT_FILES)
         in_window = added is not None and (since is None or c.ts >= since)
         if c.sha in ignore or brought:
-            if brought:   # an existing codebase brought in, not written
+            if brought:   # an existing codebase brought in, not written: its lines of code, as written would count them
                 import_times.append(c.ts)
-                import_lines.append((c.ts, sum(f.added for f in code_files)))
+                if added is None:   # numstat's count, comments and blank lines and all
+                    lines = sum(f.added for f in code_files)
+                    if lines:
+                        rough_imports.append((c.ts, lines))
+                else:
+                    lines = sum(len(added.get((c.sha, f.blob), NO_LINES)[0]) for f in code_files)
+                import_lines.append((c.ts, lines))
             elif in_window:
                 move_credit(pool, added, c.sha, c.files)
             seen.update(f.blob for f in fresh)
             continue
-        swept = sweep(counted)
+        swept = sweep(counted, added.get(ALIKE, {}) if added is not None else None, c.sha)
         if in_window and swept:
             move_credit(pool, added, c.sha, swept)
         rough = added.get(APPROXIMATE, {}) if added is not None else {}
-        for f in fresh:
+        gone = Counter(added.get((c.sha, DELETED), NO_LINES)[1]) if added is not None and moved(c) else None
+        # a version that counts is taken before the same content under a path that does not (src/ beside dist/),
+        # whichever way the two paths sort
+        for f in sorted(fresh, key=lambda f: not counts_as_code(f.path, language_of(f.path))
+                        or (c.sha, f.path) in theirs):
             if f.blob in seen:
                 continue
             seen.add(f.blob)
@@ -3302,41 +3770,48 @@ def collect(owner, repos, work, since=None):
                     approximate.append((c.ts, lines))
             else:
                 plus = added.get((c.sha, f.blob), NO_LINES)[0]
+                if gone is not None and f.status == "A" and f.path in moved(c):
+                    plus = moved_out(plus, gone)   # moved here from a file this commit deleted: only its changes
                 lines = len(plus)
                 if in_window:
                     kind = is_test(f.path, lang)
                     pool.update((h, kind) for h in plus)
                 if rough.get((c.sha, f.blob)):
-                    approximate.append((c.ts, rough[(c.sha, f.blob)]))
+                    approximate.append((c.ts, min(lines, rough[(c.sha, f.blob)])))
             if lines:
                 events.append((c.ts, lang, lines))
     # what still stands: each line of code at a head that matches a written line not already taken, one written in
     # code of its own kind (production or tests) first, so a line common to both, such as a lone brace, is split by
-    # where it was written rather than by which file sorts first; the totals are the same either way
+    # where it was written rather than by which file sorts first; the totals are the same either way. A line a
+    # fallback read is matched before one read exactly, so approximate_in_use says how many of those in use it
+    # could be. A repository whose diffs could not be read adds nothing in use.
     in_use = [0, 0]   # production, tests
     rough_in_use = 0   # of them, lines a fallback read
+    standing = [(s, bytearray(len(s))) for i, s in head.items() if s is not None and code.get(i) is not None]
     for same in (True, False):
-        for standing in head.values():
-            if standing is None:
-                continue
-            loose = getattr(standing, "approximate", {})
-            for (h, test), n in standing.items():
-                key = (h, test if same else not test)
-                taken = min(n, pool[key])
-                if taken:
-                    pool[key] -= taken
-                    standing[(h, test)] = n - taken
-                    in_use[test] += taken
-                    rough = min(taken, loose.get((h, test), 0))
-                    if rough:
-                        rough_in_use += rough
-                        loose[(h, test)] -= rough
+        for s, taken in standing:
+            hashes, tests, loose = s.hashes, s.tests, s.rough
+            first, k = [], loose.find(1)
+            while k >= 0:
+                first.append(k)
+                k = loose.find(1, k + 1)
+            for k in itertools.chain(first, range(len(hashes))):
+                if taken[k]:
+                    continue
+                test = tests[k]
+                key = (hashes[k], test if same else 1 - test)
+                if pool[key] > 0:
+                    pool[key] -= 1
+                    taken[k] = 1
+                    in_use[test] += 1
+                    rough_in_use += loose[k]
     return {"events": events, "commits": commit_times, "imports": import_times, "import_lines": import_lines,
             "mismatched": mismatched, "unread": unread, "left_out": dict(left_out),
             "copies": {repos[k]["name"] for k in holding - writing},
             "code": {"production": in_use[0], "tests": in_use[1], "unread": sum(1 for v in code.values() if v is None),
+                     "heads_unread": sum(1 for v in head.values() if v is None),
                      "approximate": approximate, "approximate_in_use": rough_in_use,
-                     "attributes_unread": attributes_unread},
+                     "approximate_imports": rough_imports, "attributes_unread": attributes_unread},
             "now": dt.datetime.now(dt.timezone.utc).timestamp()}
 
 
@@ -5439,10 +5914,25 @@ DEFINITIONS = {
     "written": {
         "means": "Lines of code the account's owner added in the window, each file version counted once: the first "
                  "time its exact content appears in any of the account's repositories or branches.",
-        "method": "Read from each commit's own diff. A line rewritten counts again; deleting a line takes nothing off.",
-        "leaves_out": "Commits by other accounts or by automation; reformatting sweeps and commits listed in "
-                      ".git-blame-ignore-revs; a change landed twice; a commit adding more than 500 new files of code "
-                      "(an existing codebase brought in); files from a template or from a relay copy of coderprint."},
+        "method": "Read from each commit's own diff. A line rewritten counts again; deleting a line takes nothing off. "
+                  "A file moved to a new name while being edited adds only the lines it changed, whether or not git "
+                  "paired the two names.",
+        "leaves_out": "Commits by other accounts or by automation; reformatting sweeps (ten or more files at once, "
+                      "each adding about what it deletes and its changed lines still reading nearly as they did) and "
+                      "commits listed in .git-blame-ignore-revs; a change landed twice; imports (see import); files "
+                      "from a template or from a relay copy of coderprint."},
+    "import": {
+        "means": "An existing codebase brought in, not written: a commit adding more than 500 new files of code, or a "
+                 "run of the author's commits to one repository, each adding at least 50 new files of code within an "
+                 "hour of the one before, that adds more than 500 in all, as uploading a project through github.com "
+                 "100 files at a time does. Only files of code count toward the 500: Markdown, YAML, TOML, plain text "
+                 "and files no language claims do not, and neither does a file the commit moved from one it deleted.",
+        "method": "It counts as a commit and an active day but adds no lines, written or in use. "
+                  "left_out.imports.loc_skipped counts the lines of code its files add, read as written is read; of "
+                  "them, approximate_loc are counted as git counts lines, blank and comment lines included, for a "
+                  "repository whose diffs could not be read.",
+        "limits": "A codebase brought in more slowly than that, in commits more than an hour apart or of fewer than 50 "
+                  "files each, counts as written."},
     "in_use": {
         "means": "Lines of code standing today at the head of each repository's default branch whose text, spacing "
                  "aside, matches a line counted as written in the window, each written line matched at most once "
@@ -5451,7 +5941,9 @@ DEFINITIONS = {
                   "place.",
         "limits": "Matching is by text, not by history: a line with the same text as one the owner wrote, a lone "
                   "closing brace above all, can match whoever put it there. Read it as an upper bound on how much "
-                  "of what was written still stands. It says nothing about whether the code is deployed or run."},
+                  "of what was written still stands. It says nothing about whether the code is deployed or run. A "
+                  "repository whose head or whose diffs could not be read adds nothing in use "
+                  "(scope.repositories.read_without_head, read_without_line_diffs)."},
     "production": {"means": "Lines in use that are not test code."},
     "test": {
         "means": "Lines in use that are test code: in a folder of tests (such as tests, __tests__, spec, e2e, "
@@ -5468,8 +5960,9 @@ DEFINITIONS = {
         "limits": "A ratio of two totals, so it carries the limits of both; it is not the share of individual lines "
                   "that survived."},
     "commit": {
-        "means": "A commit that is not a merge, on any branch (gh-pages only when it is the default), by the owner: "
-                 "counted once however many repositories hold it, and once when the same change landed twice.",
+        "means": "A commit that is not a merge, on any branch (gh-pages, and what only it holds, only when it is the "
+                 "default), by the owner: counted once however many repositories hold it, and once when the same "
+                 "change landed twice (one author, author second and subject, and most of the same lines of code).",
         "leaves_out": "Commits by other accounts or by automation, and commits dated in the future."},
     "active_day": {"means": "A day with at least one counted commit."},
     "streak": {"means": "A run of consecutive active days. The current streak may end yesterday, since today is not "
@@ -5541,6 +6034,7 @@ def card_data(owner, window, now, zone, start, S, repos, private, data, stats, s
         "scope": {
             "repositories": {"visible": len(repos), "read": readable - data["unread"], "unread": data["unread"],
                              "read_without_line_diffs": loc.get("unread", 0),
+                             "read_without_head": loc.get("heads_unread", 0),
                              "read_without_gitattributes": loc.get("attributes_unread", 0)},
             "owned_only": True, "forks": "excluded", "visibility": "public and private" if private else "public only",
             "branches": "every branch; gh-pages only when it is the default",
@@ -5578,7 +6072,9 @@ def card_data(owner, window, now, zone, start, S, repos, private, data, stats, s
             "commits": {"by_other_accounts": left.get("others", 0), "automation": left.get("automation", 0),
                         "landed_twice": left.get("landed_twice", 0), "template_or_relay_copy": left.get("copied", 0)},
             "imports": {"commits": sum(1 for t in data["imports"] if t >= start),
-                        "loc_skipped": sum(n for t, n in data["import_lines"] if t >= start)},
+                        "loc_skipped": sum(n for t, n in data["import_lines"] if t >= start),
+                        "approximate_loc": sum(n for t, n in loc.get("approximate_imports", ()) if t >= start),
+                        "definition": "#/definitions/import"},
             "future_dated_file_versions": sum(1 for t, _, _ in data["events"] if t > now + FUTURE_SLACK),
             "unparsed_commits": data["mismatched"],
         },
