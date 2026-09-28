@@ -103,7 +103,7 @@ jobs:
           owner: ${{ github.repository_owner }}
           permission-contents: read
           permission-metadata: read
-      - uses: WikdSolvemProbler/coderprint@a29e0304ebd1f20c4cc55a2a59aca147f8d9e294 # v1.2.0
+      - uses: WikdSolvemProbler/coderprint@8824fe6d04670a875a8641079dc1e6f73c647168 # v1.2.1
         with:
           token: ${{ steps.app.outputs.token }}
           window: all
