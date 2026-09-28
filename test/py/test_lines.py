@@ -259,9 +259,11 @@ for lang, text, want in (("Rust", "/* a\n /* b */\n c\n*/\nfn main() {}\n", "MMM
                          ("Kotlin", "/* a\n/* b */\n*/\nval x = 1\n", "MMMC"),
                          ("Haskell", "{- a\n{- b -}\n c -}\nmain = pure ()\n", "MMMC"),
                          ("OCaml", "(* a\n(* b *)\n c *)\nlet x = 1\n", "MMMC"), ("Lean", "/- a /- b -/\n -/\ndef x := 1\n", "MMC"),
-                         ("D", "/+ a /+ b +/\n +/\nint x;\n", "MMC"), ("Dhall", "{- a {- b -}\n-}\n1\n", "MMC")):
+                         ("D", "/+ a /+ b +/\n +/\nint x;\n", "MMC"), ("Dhall", "{- a {- b -}\n-}\n1\n", "MMC"),
+                         ("PureScript", "{- a {- b -}\nx = 1\n", "MC")):
     k = kinds(lang, text)
-    check("lines-F5", "%s block comments %s" % (lang, "nest" if lang != "C" else "do not nest"), k == want, k)
+    check("lines-F5", "%s block comments %s" % (lang, "do not nest" if lang in ("C", "PureScript") else "nest"),
+          k == want, k)
 got = collect([{"m.rs": "/* disabled:\n   /* inner note */\n   fn old() {}\n*/\nfn main() {}\n"}])
 check("lines-F5", "collect: a Rust nested comment, 1 line", got == (1, 1, 0, 0), got)
 
