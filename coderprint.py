@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""coderprint: new lines written, commit activity and the language mix over time, built from every
-repository an account owns, public and private, and drawn for its GitHub profile README.
+"""coderprint: lines of code written and still in use, commit activity and the language mix over time, built
+from every repository an account owns, public and private, and drawn for its GitHub profile README.
 
-Copyright 2026 Peter Shiller. Licensed under the PolyForm Strict License 1.0.0 (LICENSE.md), with the
-additional permission and the reservations in NOTICE.md.
+Copyright 2026 Peter Shiller. Licensed under the coderprint Noncommercial License 1.0.0 (LICENSE.md), with the
+additional permissions and the reservations in NOTICE.md; the design in design/ is licensed apart.
 
 It runs as a GitHub Action in the profile repository (see action.yml), or locally from that
 repository's folder while signed in with gh. It reads with GH_TOKEN, ideally a read-only token from the
@@ -14,20 +14,28 @@ leaving the rest of the README alone. It needs only the Python standard library,
 outside service ever sees the code.
 
 Privacy: Actions logs on a public repository are public, so this script never prints or writes a
-repository name, a file path or commit text, and names none of the private repositories itself. The
+repository name, a file path, commit text or an email address, and names none of the private repositories itself. The
 panels and assets/cards.json hold aggregates only.
 
-What counts as new code: a file version counts once, the first time its exact content appears in
-any repository or branch. Copies, moves, merges, branch landings and cross-repository imports all
-reuse content that already exists, so they add nothing. A commit that adds more than IMPORT_FILES
-brand-new files is treated as bringing in an existing codebase, not writing one, so it is skipped,
-as are commits by bots. Vendored folders, generated output, lockfiles and data files never count. A
+What counts as a line of code: a line of a programming or markup language's file that is neither blank nor a
+comment (see NOT_CODE and COMMENTS). Prose (Markdown, TeX), data (YAML, TOML) and files no language claims are
+not code. Written: the lines of code added in a file version, read from its commit's diff and counted once, the
+first time its exact content appears in any repository or branch; a commit that only reformats many files at
+once (see sweep) adds nothing for them. In use: the lines of code on each default branch today whose text the
+owner added, split into production and test code by where they live (see is_test). Copies, moves, merges, branch landings and
+cross-repository imports all reuse content that already exists, so they add nothing. Only the owner's own
+commits count (see authorship); others', automation's, and a second landing of one change add nothing. A
+commit that adds more than IMPORT_FILES brand-new files of counted code is treated as bringing in an
+existing codebase, not writing one: it is a commit, but adds no lines. File versions from another account's
+template, or from coderprint itself in a relay copy, count as already written. Vendored folders, generated
+output, lockfiles, submodules and data files never count, nor does a gh-pages branch that is not the
+default. Every time is moved to the start of its day before anything is drawn or written. A
 file's language is read from its name or extension alone, named as GitHub's Linguist names it (the
 legends shorten the few names too long for them: Visual Basic .NET is vb.net there). An extension
 several languages share counts as Other (.h, .m, .pl, .v), unless one of them writes far more of it
 than the rest (.pm counts as Perl, .gd as GDScript).
-Known limits: a merge's own conflict resolution is not counted, and a change landed twice under
-different content (a rebase that also edits) counts twice.
+Known limits: a merge's own conflict resolution is not counted, a line rewritten counts again, and a squash
+merge whose branch was deleted collapses its days into one.
 
 Window: CARDS_WINDOW picks the span the panel covers: all time, or the last 10, 5, 3 or 2 years, or 12
 months. The headline, the stats and the language column cover the whole window; a selector at the
@@ -53,7 +61,10 @@ they start.
 Motion: only ever added to a finished panel, and none for a visitor who asks for reduced motion.
 Today's activity bar breathes; in the stats rows one dot at a time hops along a row's leader and its
 value lights green as the dot arrives; the Pareto line draws itself, fast where lines came fast and
-slow across quiet time, then holds. A viewer whose animation clock never starts sees the whole panel.
+slow across quiet time, then holds; and the headline tells its story (see STORY): the ring and the bar fill
+to everything written and glow red with its figure, fall back to what is in use and glow yellow, then to
+production, then tests fill back in, each glowing green. A viewer whose animation clock never starts sees the
+whole panel.
 
 The watermark: CARDS_MARK_DATA holds its outline as SVG path data (straight segments, filled
 even-odd), passed from a secret so the path data is never written to the repository. It is drawn into
@@ -79,10 +90,10 @@ repeats what the GitHub profile already shows (name, status, links, location, co
 
 The compact panel: on a phone the README is about 81 CSS px narrower than the screen, so the merged card is
 drawn at about a third of its size and its labels at 3 or 4 px. The compact panel carries the wide one's
-numbers, bars, chart, legend and motion at 360x686 (its chart heading shortens to LANGUAGE MIX), drawn at
-0.78 to 0.97 of its size on a phone, with nothing that must be read under 10 units: the activity bars
-sit beside the headline, lines up and commits down, with their key on a row of its own under them, the
-stats run full width and the legend goes under the chart in two columns. Its bottom corners are square,
+numbers, bars, chart, legend and motion at 360x806 (its chart heading shortens to LANGUAGE MIX), drawn at
+0.78 to 0.97 of its size on a phone, with nothing that must be read under 10 units: the headline's tiles,
+ring and bar run full width with the activity bars under them, the stats run full width and the legend
+goes under the chart in two columns. Its bottom corners are square,
 since the relay joins it to a strip beneath. The README shows it on screens 540 CSS px wide or less (see
 Layout), through the relay or on its own.
 
@@ -121,11 +132,13 @@ import struct
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import unicodedata
 import urllib.parse
 import urllib.request
 import zlib
+from array import array
 from collections import Counter, namedtuple
 
 try:
@@ -139,8 +152,28 @@ OUT_DIR = os.path.join(WORK, "assets")
 README = os.path.join(WORK, "README.md")
 IMPORT_FILES = 500
 TIMEOUT = 900
-NOTICE = ("coderprint. Copyright 2026 Peter Shiller. All rights reserved except as licensed under the PolyForm "
-          "Strict License 1.0.0: https://github.com/WikdSolvemProbler/coderprint")
+DEADLINE = None   # the run's own deadline, on time.monotonic(), when CARDS_TIME_LIMIT sets one (see time_limit)
+RESERVE = 120     # seconds kept back from it for reading the profile and drawing and writing the panels
+UNREAD_SHARE = 0.10   # the panels are redrawn when at most one repository, or this share of them, could not be read
+UPSTREAM = "WikdSolvemProbler/coderprint"   # this project, whose files a relay copy holds but did not write
+ALIASES = 50        # commits looked up in one query when telling whose an email address is
+RESOLVE_CALLS = 20  # and at most this many queries a run; addresses past them stay unknown
+# Automation that commits under a name or address of its own rather than a [bot] one: git scraping, release
+# tooling, and a workflow's commit authored as whoever triggered it, which the committer then gives away.
+AUTOMATION_NAMES = {"automated", "github action", "github actions", "github-actions", "actions-user",
+                    "semantic-release-bot"}
+AUTOMATION_EMAILS = {"action@github.com", "actions@github.com", "actions@users.noreply.github.com",
+                     "github-actions@github.com", "41898282+github-actions[bot]@users.noreply.github.com"}
+Commit = namedtuple("Commit", "ts repo sha bot email name subject files")
+Change = namedtuple("Change", "blob status path added deleted")
+# A sweep: a commit that modifies at least SWEEP_FILES counted files, nearly every one (SWEEP_SHARE) adding
+# within SWEEP_BALANCE of what it deletes, as reformatting, re-indenting or a line-ending change does. Its
+# balanced files add no lines. git's own whitespace options (-w, -b) would say the same file by file, but
+# on real histories they made reading hundreds of times slower and dropped files from the line counts.
+SWEEP_FILES, SWEEP_SHARE, SWEEP_BALANCE = 10, 0.9, 0.1
+NOTICE = ("Drawn by coderprint (https://github.com/WikdSolvemProbler/coderprint): its code, design and wordmark are "
+          "Peter Shiller's, licensed as LICENSE.md, design/LICENSE.md and NOTICE.md there say. What the card reports "
+          "is its owner's.")
 
 # The span the whole panel covers, chosen once by whoever installs it (CARDS_WINDOW): its selector
 # label, its name in prose, and its length in days (None for all time).
@@ -151,8 +184,11 @@ WINDOWS = {
 WINDOW_ORDER = ["all", "10y", "5y", "3y", "2y", "12m"]
 LINK = os.environ.get("CARDS_LINK") or "https://github.com/WikdSolvemProbler/coderprint"   # where a click goes
 
-EXCLUDED_DIRS = {
-    "node_modules", "vendor", "vendors", "third_party", "thirdparty", "dist", "build", "out", "target", "coverage",
+# A folder whose name ends in a vendor word holds others' code whatever comes before it (s01t00_vendor,
+# go-vendor, lib_vendored), while one that only starts with it is the owner's own (src/vendor_portal).
+VENDOR_ENDS = tuple(sep + word for sep in "_-" for word in ("vendor", "vendors", "vendored")) + ("_target",)
+EXCLUDED_DIRS = {   # whole folder names
+    "node_modules", "vendor", "vendors", "vendored", "_vendor", "third_party", "thirdparty", "dist", "build", "out", "target", "coverage",
     ".next", "__pycache__", ".venv", "venv", "site-packages", ".goldens", ".fixtures", ".dart_tool", ".idea", ".lake",
     ".mvn", ".nuxt", ".stack-work", ".svelte-kit", ".terraform", ".yarn", "3rd-party", "3rd_party", "3rdparty",
     "__generated__", "_build", "_esy", "_opam", "_site", "bower_components", "carthage", "deriveddata", "dist-newstyle",
@@ -172,7 +208,7 @@ EXCLUDED_EXTS = {
 }
 EXCLUDED_NAMES = {
     "package-lock.json", "yarn.lock", "pnpm-lock.yaml", "cargo.lock", "poetry.lock", "uv.lock", ".gitignore",
-    ".gitattributes", ".gitkeep", "license", ".bash_history", ".rapp.history", ".rhistory", ".secrets.baseline",
+    ".gitattributes", ".gitkeep", ".gitmodules", ".git-blame-ignore-revs", ".mailmap", "license", ".bash_history", ".rapp.history", ".rhistory", ".secrets.baseline",
     ".terraform.lock.hcl", "aclocal.m4", "bun.lockb", "cargo.toml.orig", "config.guess", "config.sub", "configure",
     "cpplint.py", "dotnet-install.ps1", "dotnet-install.sh", "erlang.mk", "go.sum", "gradlew", "gradlew.bat",
     "juliamanifest.toml", "libtool.m4", "ltoptions.m4", "ltsugar.m4", "ltversion.m4", "lt~obsolete.m4", "manifest.toml",
@@ -344,7 +380,7 @@ PLAIN = {
                            dim="#6e7681", prose="#c9d1d9", other="#3d444d", spotify="010409", grid=".035",
                            mark=".09"),
     },
-    "green": "#2da44e", "red": "#cf222e", "colors": {},
+    "green": "#2da44e", "red": "#cf222e", "yellow": "#bf8700", "yellow_lite": "#9a6700", "colors": {},
     "shared": {c: [] for c in ("#0969da", "#bf8700", "#8250df", "#1a7f37", "#bc4c00", "#0550ae", "#6639ba",
                                "#57606a")},
 }
@@ -372,7 +408,9 @@ THEMES = {name: dict(tokens) for name, tokens in DESIGN["themes"].items()}
 THEME_ORDER = list(DESIGN["order"])   # the strip's order, and the daily turn's
 VARIANTS = {name: tuple(pair) for name, pair in DESIGN["variants"].items()}   # each theme's lite and nite
 GREEN = DESIGN["green"]   # the bars that echo the Spotify widget's equalizer
-RED = DESIGN["red"]       # the Pareto line, the one bright mark on the chart
+RED = DESIGN["red"]       # the Pareto line, the one bright mark on the chart; and everything written, lit
+YELLOW = DESIGN.get("yellow", PLAIN["yellow"])                  # what is still in use, lit, on a nite
+YELLOW_LITE = DESIGN.get("yellow_lite", PLAIN["yellow_lite"])   # and on a lite, where the nite's would be too pale
 SANS = "-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif"   # the widget's stack
 MONO = ("'IBM Plex Mono', ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, 'Liberation Mono', "
         "monospace")
@@ -473,6 +511,9 @@ Place = namedtuple("Place", "id country region people zone")
 
 # The current theme's colors; use_theme() sets them before each panel is drawn.
 BG = LINE = TEXT = MUTED = DIM = OTHER_COLOR = ""
+AS_OF = None   # the run's own day, written at the bars' right end so a panel that stops refreshing is dated
+QUANTITY = None   # the headline's figures: lines of code written in the window, and of them production and tests
+                  # still in use (see collect)
 THEME = {}
 LAYER_COLORS = {}
 
@@ -498,7 +539,8 @@ SPOTIFY_URL = ("https://spotify-github-profile.kittinanx.com/api/view?uid={uid}"
 # rayriffy/apple-music-github-profile's card of the track last played on Apple Music. It takes only a light
 # or dark theme and the uid: no background, so beside the panel it keeps its own colors.
 APPLE_MUSIC_URL = "https://music-profile.rayriffy.com/theme/{theme}.svg?uid={uid}"
-ALT = "New lines written, commit activity and language mix across public and private repositories"
+ALT = ("Lines of code written and still in use, commit activity and language mix across the account's own "
+       "repositories, not forks")
 README_START, README_END = "<!-- coderprint:start -->", "<!-- coderprint:end -->"
 # With a relay (CARDS_RELAY), the panel and the music card arrive as one merged image, so neither can
 # show up before the other; with neither a relay nor a music card, the panel is shown alone. Either way
@@ -549,8 +591,14 @@ def truthy(name):
 
 def run(args, cwd=None, env=None, timeout=TIMEOUT):
     """Run a command. Failures carry only the program's name: argv can hold a clone URL, which would
-    name a private repository in a public log, so no exception that carries argv leaves here."""
+    name a private repository in a public log, so no exception that carries argv leaves here. Under a
+    deadline (see time_limit) a command gets no longer than the run has left, less RESERVE."""
     what = os.path.basename(args[0])
+    if DEADLINE is not None:
+        left = DEADLINE - time.monotonic() - RESERVE
+        if left < 5:
+            raise RuntimeError("%s was not started: the run is out of time" % what)
+        timeout = min(timeout, int(left))
     try:
         p = subprocess.run(args, cwd=cwd, env=env, capture_output=True, timeout=timeout)
     except subprocess.TimeoutExpired:
@@ -581,7 +629,8 @@ def owner_login():
 
 
 def list_repositories(owner):
-    """Every non-fork repository the account owns, a page of 100 at a time, bar the profile repository."""
+    """Every non-fork repository the account owns, a page of 100 at a time, bar the profile repository, with
+    whether it can be read (a disabled or locked repository is counted but never cloned)."""
     nodes, cursor = [], None
     while True:
         page_args = {"owner": owner}
@@ -591,7 +640,7 @@ def list_repositories(owner):
           query($owner: String!, $cursor: String) { repositoryOwner(login: $owner) {
             repositories(first: 100, after: $cursor, ownerAffiliations: OWNER, isFork: false,
                          orderBy: {field: CREATED_AT, direction: ASC}) {
-              nodes { name isPrivate } pageInfo { hasNextPage endCursor } } } }""", **page_args)
+              nodes { name isPrivate isDisabled isLocked } pageInfo { hasNextPage endCursor } } } }""", **page_args)
         if not data.get("repositoryOwner"):
             raise RuntimeError("GitHub has no account named by CARDS_OWNER")
         page = data["repositoryOwner"]["repositories"]
@@ -636,7 +685,7 @@ def language_of(path):
     parts = path.replace("\\", "/").split("/")
     for seg in parts[:-1]:
         s = seg.lower()
-        if s in EXCLUDED_DIRS or "vendor" in s or s.endswith("_target"):
+        if s in EXCLUDED_DIRS or s.endswith(VENDOR_ENDS):
             return None
     name = parts[-1].lower()
     if name in EXCLUDED_NAMES or name.endswith(EXCLUDED_SUFFIXES) or name.startswith(EXCLUDED_PREFIXES):
@@ -649,36 +698,208 @@ def language_of(path):
     return SUFFIXES.get(os.path.splitext(stem)[1] + ext) or LANGUAGES.get(ext, OTHER)
 
 
-def read_commits(repo_dir, index):
-    """Every non-merge commit on every branch, with its author and each file's new blob and lines added.
-    Records are split on NUL, which no git author name or unquoted path can contain."""
+def automated(name, email, committer, committer_email):
+    """Whether a commit is automation's: a [bot] author or committer, or a name or address automation
+    uses (AUTOMATION_NAMES, AUTOMATION_EMAILS). GitHub's own web committer, which marks the owner's edits
+    and merges on github.com, is not automation."""
+    names = (name.strip().lower(), committer.strip().lower())
+    return (any(n.endswith("[bot]") or n in AUTOMATION_NAMES for n in names)
+            or email.strip().lower() in AUTOMATION_EMAILS or committer_email.strip().lower() in AUTOMATION_EMAILS)
+
+
+def read_commits(repo_dir, index, renames=True):
+    """Every non-merge commit on every branch but gh-pages, with its author's name and address, its subject
+    and each file's new blob and lines added and deleted. Submodules are left out. Records are split on NUL,
+    which no git author name, subject or unquoted path can contain; the subject is never printed or written."""
     if not run(["git", "-C", repo_dir, "for-each-ref", "--count=1", "refs/heads"]).strip():
         return [], 0  # an empty repository has nothing to read
-    out = run(["git", "-C", repo_dir, "-c", "core.quotepath=off", "log", "--all", "--no-merges", "-M",
-               "--no-abbrev", "--raw", "--numstat", "--format=%x00%H%x1f%at%x1f%an"]).decode("utf-8", "replace")
+    out = run(["git", "-C", repo_dir, "-c", "core.quotepath=off", "log", "--exclude=refs/heads/gh-pages", "--all",
+               "--no-merges", "-M" if renames else "--no-renames", "--no-abbrev", "--no-textconv", "--raw", "--numstat",
+               "--format=%x00%H%x1f%at%x1f%an%x1f%aE%x1f%cn%x1f%cE%x1f%s"]).decode("utf-8", "replace")
     commits, mismatched = [], 0
     for block in out.split("\x00")[1:]:
         head, _, body = block.partition("\n")
-        parts = head.split("\x1f", 2)
-        if len(parts) != 3 or not re.fullmatch(r"[0-9a-f]{40}", parts[0]) or not parts[1].isdigit():
+        parts = head.split("\x1f", 6)
+        if (len(parts) != 7 or not re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", parts[0])
+                or not parts[1].isdigit()):
             mismatched += 1
             continue
-        sha, ts, author = parts
+        sha, ts, author, email, committer, committer_email, subject = parts
         raw, num = [], []
         for line in body.splitlines():
             if line.startswith(":"):
                 meta, _, paths = line.partition("\t")
                 fields = meta.split()
-                raw.append((fields[3], fields[4][0], paths.split("\t")[-1]))
+                raw.append((fields[3], fields[4][0], paths.split("\t")[-1], fields[1]))
             elif line.count("\t") >= 2:
                 a, d, _ = line.split("\t", 2)
-                num.append(None if a == "-" else int(a))
+                num.append((None, None) if a == "-" else (int(a), int(d)))
         if len(raw) != len(num):
             mismatched += 1
             continue
-        files = [(blob, status, path, added) for (blob, status, path), added in zip(raw, num)]
-        commits.append((int(ts), index, sha, author.strip().lower().endswith("[bot]"), files))
+        files = [Change(blob, status, path, added, deleted)
+                 for (blob, status, path, mode), (added, deleted) in zip(raw, num) if mode != "160000"]
+        commits.append(Commit(int(ts), index, sha, automated(author, email, committer, committer_email),
+                              email.strip().lower(), author.strip(), subject, files))
     return commits, mismatched
+
+
+def sweep(counted):
+    """The files of a commit that only reformat (see SWEEP_FILES): its modified counted files that add about
+    what they delete, when there are at least SWEEP_FILES of them and nearly all are like that. Otherwise
+    none. First writes are never touched, so a sweep cannot hide new files."""
+    changed = [f for f in counted if f.status in ("M", "R") and f.added]
+    balanced = [f for f in changed if abs(f.added - f.deleted) <= max(1, SWEEP_BALANCE * max(f.added, f.deleted))]
+    if len(balanced) >= SWEEP_FILES and len(balanced) >= SWEEP_SHARE * len(changed):
+        return set(balanced)
+    return set()
+
+
+def ignored_revs(repo_dir):
+    """The commits a repository names in .git-blame-ignore-revs on its default branch: sweeps its owner
+    marked as reformatting, not writing. They still count as commits, but add no lines."""
+    try:
+        text = run(["git", "-C", repo_dir, "show", "HEAD:.git-blame-ignore-revs"], timeout=60)
+    except RuntimeError:
+        return set()
+    return set(re.findall(r"(?m)^[ \t]*([0-9a-f]{64}|[0-9a-f]{40})\b", text.decode("utf-8", "replace")))
+
+
+def read_repository(owner, name, dest, index):
+    """Clone and read one repository, trying each once more on failure, the second time without rename
+    detection if the first timed out (moving many paths at once slows it down past any limit). Returns its
+    commits, how many could not be parsed, and the commits it marks as sweeps."""
+    renames = True
+    for attempt in (1, 2):
+        try:
+            clone(owner, name, dest)
+            commits, bad = read_commits(dest, index, renames)
+            return commits, bad, ignored_revs(dest)
+        except RuntimeError as e:
+            if attempt == 2 or "out of time" in str(e):
+                raise
+            renames = renames and "timed out" not in str(e)
+            if os.path.isdir(dest):   # a clone that failed part way is started again, not fetched into
+                remove_tree(dest)
+
+
+def seed_blobs(full_name, dest):
+    """Every file version in the whole history of a repository someone else wrote (a template, or coderprint
+    itself in a relay copy), read from a clone without file contents: git lists a file version it does not
+    hold with a leading "?". None if it cannot be read, which only means nothing is left out."""
+    if not re.fullmatch(r"[A-Za-z0-9-]{1,39}/[A-Za-z0-9._-]{1,100}", full_name):
+        return None
+    flags, env = git_auth()
+    try:
+        run(["git"] + flags + ["clone", "--bare", "--quiet", "--filter=blob:none",
+                               "https://github.com/%s.git" % full_name, dest], env=env, timeout=300)
+        out = run(["git", "-C", dest, "rev-list", "--objects", "--all", "--missing=print"], timeout=300)
+    except RuntimeError:
+        return None
+    finally:
+        if os.path.isdir(dest):
+            remove_tree(dest)
+    return {line[1:].strip() for line in out.decode("ascii", "replace").splitlines() if line.startswith("?")}
+
+
+def templates(owner):
+    """The template each repository was made from, when that is another account's: {name: owner/name}.
+    Asked apart from the listing, so a template the token cannot see never fails the run; nothing on
+    any failure."""
+    found, cursor = {}, None
+    try:
+        while True:
+            page_args = {"owner": owner}
+            if cursor:
+                page_args["cursor"] = cursor
+            data = gql("""
+              query($owner: String!, $cursor: String) { repositoryOwner(login: $owner) {
+                repositories(first: 100, after: $cursor, ownerAffiliations: OWNER, isFork: false) {
+                  nodes { name templateRepository { nameWithOwner } } pageInfo { hasNextPage endCursor } } } }""",
+                       **page_args)
+            page = data["repositoryOwner"]["repositories"]
+            for node in page["nodes"]:
+                made = (node.get("templateRepository") or {}).get("nameWithOwner") or ""
+                if made and made.split("/")[0].lower() != owner.lower():
+                    found[node["name"]] = made
+            if not page["pageInfo"]["hasNextPage"]:
+                return found
+            cursor = page["pageInfo"]["endCursor"]
+    except (RuntimeError, ValueError, KeyError, TypeError):
+        return {}
+
+
+def owner_identity(owner):
+    """Whether the account is a person, and a person's account id and profile name, for telling their commits
+    from other people's. None when it cannot be read."""
+    try:
+        data = gql("query($owner: String!) { repositoryOwner(login: $owner) { __typename "
+                   "... on User { databaseId name } } }", owner=owner)
+        found = data["repositoryOwner"]
+        return {"user": found["__typename"] == "User", "id": found.get("databaseId"), "name": found.get("name") or ""}
+    except (RuntimeError, ValueError, KeyError, TypeError):
+        return None
+
+
+def resolve_authors(owner, samples):
+    """Whose GitHub account each email address is, asked through one commit that uses it: samples maps an
+    address to (repository name, commit hash), most used first. Returns {address: login, or None when the
+    address belongs to no account}; addresses past RESOLVE_CALLS queries of ALIASES are left out. Raises
+    RuntimeError if GitHub cannot be asked, so the caller can count every commit rather than guess."""
+    if not re.fullmatch(r"[A-Za-z0-9-]{1,39}", owner):
+        raise RuntimeError("the account's login cannot be looked up")
+    found, items = {}, [(e, s) for e, s in samples.items()
+                        if re.fullmatch(r"[A-Za-z0-9._-]{1,100}", s[0]) and re.fullmatch(r"[0-9a-f]{40,64}", s[1])]
+    for k in range(0, min(len(items), RESOLVE_CALLS * ALIASES), ALIASES):
+        batch, by_repo = items[k:k + ALIASES], {}
+        for j, (_, (name, sha)) in enumerate(batch):
+            by_repo.setdefault(name, []).append((j, sha))
+        query = " ".join('r%d: repository(owner: "%s", name: "%s") { %s }' % (
+            r, owner, name, " ".join('c%d: object(oid: "%s") { ... on Commit { author { user { login } } } }' % pair
+                                     for pair in shas))
+            for r, (name, shas) in enumerate(by_repo.items()))
+        data = gql("query { %s }" % query)
+        for r, (name, shas) in enumerate(by_repo.items()):
+            repo = data.get("r%d" % r) or {}
+            for j, _ in shas:
+                user = ((repo.get("c%d" % j) or {}).get("author") or {}).get("user") or {}
+                found[batch[j][0]] = user.get("login")
+    return found
+
+
+def authorship(owner, commits, identity, repos):
+    """The addresses whose commits are the owner's. The owner's noreply addresses and any listed in
+    CARDS_AUTHOR_EMAILS are theirs; every other address is looked up on GitHub. One that belongs to another
+    account is someone else's. One that belongs to none is the owner's in a repository with no other human
+    address (a solo repository is its owner's, whatever laptop it was committed from), and elsewhere only
+    under a name the owner's own commits, login or profile use. Returns None, so every commit counts, for an
+    organization, whose members' work is all its own, or when GitHub cannot be asked."""
+    if not identity or not identity["user"]:
+        return None
+    mine = {"%s@users.noreply.github.com" % owner.lower()}
+    if identity["id"]:
+        mine.add("%d+%s@users.noreply.github.com" % (identity["id"], owner.lower()))
+    mine |= {e.strip().lower() for e in os.environ.get("CARDS_AUTHOR_EMAILS", "").split(",") if e.strip()}
+    human = [c for c in commits if not c.bot]
+    uses = Counter(c.email for c in human)
+    samples = {}
+    for c in human:
+        samples.setdefault(c.email, (repos[c.repo]["name"], c.sha))
+    asked = {e: samples[e] for e, _ in uses.most_common() if e not in mine}
+    try:
+        login = resolve_authors(owner, asked)
+    except RuntimeError:
+        return None
+    for email, who in login.items():
+        if who and who.lower() == owner.lower():
+            mine.add(email)
+    names = {c.name.casefold() for c in human if c.email in mine} | {owner.casefold(), identity["name"].casefold()}
+    names.discard("")
+    per_repo = {}
+    for c in human:
+        per_repo.setdefault(c.repo, set()).add(c.email)
+    return {(c.repo, c.email) for c in human
+            if c.email in mine or (not login.get(c.email) and (len(per_repo[c.repo]) == 1 or c.name.casefold() in names))}
 
 
 def slot(work, owner, name):
@@ -686,43 +907,378 @@ def slot(work, owner, name):
     return os.path.join(work, hashlib.sha256((owner + "/" + name).lower().encode()).hexdigest()[:16] + ".git")
 
 
-def collect(owner, repos, work):
-    """Every counted file version as (time, language, new lines), oldest first, plus the times of human
-    commits and of skipped imports, over the whole history; the window is applied afterwards. A commit
-    held by more than one repository, as in a fork, a mirror or the relay's private copy, counts once."""
-    all_commits, mismatched = [], 0
+# ---------------------------------------------------------------- lines of code
+
+# A line of code is a line of a file in a programming or markup language that is neither blank nor a comment.
+# Prose (Markdown, TeX), data (YAML, TOML) and files no language claims are never code.
+NOT_CODE = {"Markdown", "TeX", "YAML", "TOML", OTHER}
+# How each language comments: the prefixes that start a line comment, and the pairs that open and close a block.
+# A language missing here has every line that is not blank read as code.
+C_COMMENTS = (("//",), (("/*", "*/"),))
+HASH_COMMENTS = (("#",), ())
+COMMENTS = {
+    **{lang: C_COMMENTS for lang in (
+        "C", "C++", "C#", "Java", "JavaScript", "TypeScript", "Go", "Rust", "Swift", "Kotlin", "Scala", "Dart",
+        "Groovy", "Gradle", "Objective-C++", "Zig", "Solidity", "Cuda", "GLSL", "HLSL", "WGSL", "Vala", "Haxe", "Apex",
+        "D", "Protocol Buffer", "Thrift", "Jsonnet", "CUE", "Odin", "Carbon", "Metal", "Vue", "Svelte", "Astro", "Move",
+        "Cairo", "Bicep", "Pkl", "QML", "Gleam", "Verilog", "SystemVerilog", "ReScript", "Reason", "ShaderLab",
+        "Processing", "AIDL", "GraphQL", "Stan", "Nextflow", "ANTLR", "Yacc", "Lex", "Blade", "Twig")},
+    **{lang: HASH_COMMENTS for lang in (
+        "Shell", "Nushell", "Perl", "R", "Makefile", "Dockerfile", "CMake", "Nim", "Crystal", "Elixir", "Tcl", "Awk",
+        "Starlark", "GDScript", "Just", "Raku", "Janet", "Meson", "Procfile", "Gnuplot", "Stata", "SAS", "Sage", "GAP",
+        "Earthly", "jq", "sed", "M4", "Vyper", "Hy", "Mojo")},
+    **{"PHP": (("//", "#"), (("/*", "*/"),)), "CSS": ((), (("/*", "*/"),)), "HCL": (("#", "//"), (("/*", "*/"),)),
+       "Nix": (("#",), (("/*", "*/"),)), "Python": (("#",), (('"""', '"""'), ("'''", "'''"))),
+       "Cython": (("#",), (('"""', '"""'), ("'''", "'''"))), "Ruby": (("#",), (("=begin", "=end"),)),
+       "PowerShell": (("#",), (("<#", "#>"),)), "Julia": (("#",), (("#=", "=#"),)),
+       "CoffeeScript": (("#",), (("###", "###"),)), "Lua": (("--",), (("--[[", "]]"),)),
+       "Luau": (("--",), (("--[[", "]]"),)), "Haskell": (("--",), (("{-", "-}"),)), "Elm": (("--",), (("{-", "-}"),)),
+       "PureScript": (("--",), (("{-", "-}"),)), "Agda": (("--",), (("{-", "-}"),)),
+       "Idris": (("--",), (("{-", "-}"),)), "SQL": (("--",), (("/*", "*/"),)), "Lean": (("--",), (("/-", "-/"),)),
+       "Ada": (("--",), ()), "VHDL": (("--",), ()), "AppleScript": (("--",), (("(*", "*)"),)),
+       "OCaml": ((), (("(*", "*)"),)), "Standard ML": ((), (("(*", "*)"),)), "F#": (("//",), (("(*", "*)"),)),
+       "F*": (("//",), (("(*", "*)"),)), "Rocq Prover": ((), (("(*", "*)"),)), "Isabelle": ((), (("(*", "*)"),)),
+       "Wolfram": ((), (("(*", "*)"),)), "Pascal": (("//",), (("{", "}"), ("(*", "*)"))),
+       "MATLAB": (("%",), (("%{", "%}"),)), "Erlang": (("%",), ()), "Prolog": (("%",), (("/*", "*/"),)),
+       "Common Lisp": ((";",), (("#|", "|#"),)), "Clojure": ((";",), ()), "Scheme": ((";",), (("#|", "|#"),)),
+       "Racket": ((";",), (("#|", "|#"),)), "Emacs Lisp": ((";",), ()), "Fennel": ((";",), ()),
+       "Assembly": ((";", "#"), ()), "Batchfile": (("rem ", "::", "@rem "), ()), "VBScript": (("'", "rem "), ()),
+       "Visual Basic .NET": (("'",), ()), "Fortran": (("!",), ()), "HTML": ((), (("<!--", "-->"),)),
+       "XSLT": ((), (("<!--", "-->"),)), "Vim script": (('"',), ()), "Scilab": (("//",), ()),
+       "Asymptote": (("//",), (("/*", "*/"),)), "Typst": (("//",), (("/*", "*/"),))}}
+# Test code, by where it lives: a folder of tests anywhere in the path, or a file named as one (test_x.py,
+# x_test.go, x.test.ts, XTest.java, and this project's own xTEST.py); Rust's #[cfg(test)] modules are found
+# inside the files at the head.
+TEST_DIRS = {"test", "tests", "__tests__", "spec", "specs", "testing", "e2e", "integration_tests", "__mocks__", "mocks",
+             "fixtures", "test_utils", "testutils", "benches", "benchmarks"}
+TEST_WORD = re.compile(r"^(?:x|rs|py|js|ts|go|e2e|unit|int|smoke)?tests?$|^specs?$", re.I)
+CAMEL_TEST = re.compile(r"[a-z0-9](?:Test|Tests|Spec|IT)\.[A-Za-z]+$")
+
+
+class LineKinds:
+    """Reads consecutive lines of one language as code, comment or blank, following block comments from one
+    line to the next. Over a whole file this is exact as far as line-level syntax goes; over a hunk of added
+    lines, a hunk that starts inside a comment opened above it is read as code."""
+
+    def __init__(self, lang):
+        self.prefixes, self.blocks = COMMENTS.get(lang, ((), ()))
+        self.inside = None
+
+    def kind(self, line):
+        s = line.strip()
+        if not s:
+            return "blank"
+        if self.inside:
+            if self.inside in s:
+                self.inside = None
+            return "comment"
+        for start, end in self.blocks:
+            if s.startswith(start):
+                if end not in s[len(start):]:
+                    self.inside = end
+                return "comment"
+        return "comment" if s.lower().startswith(self.prefixes) else "code"
+
+
+def is_test(path):
+    """Whether a file is test code, by its folders and its name (see TEST_DIRS)."""
+    parts = path.replace("\\", "/").split("/")
+    if any(p.lower() in TEST_DIRS for p in parts[:-1]):
+        return True
+    name = parts[-1]
+    return bool(CAMEL_TEST.search(name) or re.search(r"\.(?:test|spec)\.[A-Za-z]+$", name, re.I)
+                or any(TEST_WORD.match(w) for w in re.split(r"[_.\-]", name.split(".")[0]) if w))
+
+
+def line_hash(text):
+    """A line's text with its whitespace collapsed, as a number that lasts only as long as this run."""
+    return hash(" ".join(text.split()))
+
+
+def limit():
+    """How long a command may run: TIMEOUT, or less when the run's deadline is nearer."""
+    if DEADLINE is None:
+        return TIMEOUT
+    left = DEADLINE - time.monotonic() - RESERVE
+    if left < 5:
+        raise RuntimeError("git was not started: the run is out of time")
+    return min(TIMEOUT, int(left))
+
+
+def git_lines(args, handle, feed=None):
+    """Runs git and hands each line of its output to handle as it arrives, so an output of any size is never held
+    whole. feed, if given, is written to git's input from another thread, so neither pipe can fill and stall.
+    Fails as run() does, naming only the program."""
+    seconds = limit()
+    try:
+        proc = subprocess.Popen(args, stdin=subprocess.PIPE if feed is not None else subprocess.DEVNULL,
+                                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+    except OSError:
+        raise RuntimeError("git could not be started") from None
+    if feed is not None:
+        def write():
+            try:
+                proc.stdin.write(feed)
+            except OSError:
+                pass
+            finally:
+                try:
+                    proc.stdin.close()
+                except OSError:
+                    pass
+        threading.Thread(target=write, daemon=True).start()
+    timer = threading.Timer(seconds, proc.kill)
+    timer.start()
+    try:
+        handle(proc.stdout)
+        while proc.stdout.read(1 << 16):   # anything handle left, so git is never stuck writing it
+            pass
+        proc.wait()   # git ends on its own once its output is read; the timer still bounds the wait
+    finally:
+        timer.cancel()
+        if proc.poll() is None:
+            proc.kill()
+        proc.stdout.close()
+        code = proc.wait()
+    if code != 0:
+        raise RuntimeError("git exited %d, or ran past its %d seconds" % (code, seconds))
+
+
+def read_added_code(repo_dir):
+    """The lines of code each file version adds and removes, read from its commit's diff with no context, so
+    what a commit adds is exactly its added lines: {(commit, blob): (array of the added lines' line_hash, array
+    of the removed lines')}. A comment or blank line is left out; so are files that are not code (NOT_CODE)."""
+    added = {}
+    state = {"sha": None, "blob": None, "lang": None, "header": False, "reader": None, "old": None,
+             "hashes": None, "removed": None}
+
+    def finish():
+        if state["hashes"] is not None:
+            added[(state["sha"], state["blob"])] = (state["hashes"], state["removed"])
+        state["hashes"] = state["removed"] = None
+
+    def handle(stream):
+        s = state
+        for raw in stream:
+            line = raw.decode("utf-8", "replace").rstrip("\n")
+            if line.startswith("\x00"):
+                finish()
+                s.update(sha=line[1:].strip(), header=False, blob=None, lang=None)
+            elif line.startswith("diff --git "):
+                finish()
+                s.update(header=True, blob=None, lang=None)
+            elif s["header"]:
+                if line.startswith("index "):
+                    ids = line[6:].split(" ")[0].split("..")
+                    s["blob"] = ids[1] if len(ids) == 2 and re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", ids[1]) else None
+                elif line.startswith("+++ "):
+                    path = line[4:].strip('"')   # git quotes a name holding a quote or a tab; the ending survives
+                    path = None if path == "/dev/null" else path[2:] if path.startswith("b/") else path
+                    lang = language_of(path) if path else None
+                    s["lang"] = lang if lang and lang not in NOT_CODE else None
+                elif line.startswith("@@"):
+                    s.update(header=False, reader=LineKinds(s["lang"]), old=LineKinds(s["lang"]))
+                    if s["blob"] and s["lang"]:
+                        s.update(hashes=array("q"), removed=array("q"))
+            elif line.startswith("@@"):   # a new hunk: whatever the last one left open is unknown
+                s.update(reader=LineKinds(s["lang"]), old=LineKinds(s["lang"]))
+            elif s["hashes"] is None:
+                continue
+            elif line.startswith("+") and s["reader"].kind(line[1:]) == "code":
+                s["hashes"].append(line_hash(line[1:]))
+            elif line.startswith("-") and s["old"].kind(line[1:]) == "code":
+                s["removed"].append(line_hash(line[1:]))
+        finish()
+
+    # --no-textconv: a text conversion (Git for Windows ships one for PDF and Word files) starts a program for
+    # every version of every such file, and what it prints is not what the file holds
+    git_lines(["git", "-C", repo_dir, "-c", "core.quotepath=off", "log", "--exclude=refs/heads/gh-pages", "--all",
+               "--no-merges", "-M", "-p", "-U0", "--full-index", "--no-color", "--no-ext-diff", "--no-textconv",
+               "--format=%x00%H"], handle)
+    return added
+
+
+def read_head_code(repo_dir):
+    """The lines of code on the default branch as it stands, read whole file by whole file: a Counter of
+    (line_hash, whether it is test code). A Rust #[cfg(test)] module counts as test code, wherever its file is."""
+    listing = run(["git", "-C", repo_dir, "ls-tree", "-r", "-z", "--full-tree", "HEAD"]).decode("utf-8", "replace")
+    files = []
+    for item in listing.split("\x00"):
+        meta, _, path = item.partition("\t")
+        fields = meta.split()
+        lang = language_of(path) if len(fields) == 3 and fields[1] == "blob" else None
+        if lang and lang not in NOT_CODE:
+            files.append((fields[2], path, lang))
+    head = Counter()
+    if not files:
+        return head
+
+    def handle(stream):
+        for blob, path, lang in files:
+            header = stream.readline().split()
+            if len(header) < 3:
+                continue
+            body = stream.read(int(header[2]))
+            stream.read(1)
+            if b"\x00" in body[:8000]:
+                continue
+            test, reader, depth, inside = is_test(path), LineKinds(lang), 0, None
+            for text in body.decode("utf-8", "replace").splitlines():
+                kind = reader.kind(text)
+                in_test = test
+                if lang == "Rust" and not test:
+                    s = text.strip()
+                    if inside is None and s.startswith("#[cfg(test)]"):
+                        inside, s = depth, s[len("#[cfg(test)]"):].strip()
+                    in_test = inside is not None
+                    depth += text.count("{") - text.count("}")
+                    if inside is not None and depth <= inside and ("}" in text or s.endswith(";")):
+                        inside = None   # the module closed, or the attribute was on one item such as a use
+                if kind == "code":
+                    head[(line_hash(text), in_test)] += 1
+
+    git_lines(["git", "-C", repo_dir, "cat-file", "--batch"], handle,
+              feed="".join(blob + "\n" for blob, _, _ in files).encode())
+    return head
+
+
+NO_LINES = ((), ())   # a file version whose diff added and removed no line of code
+
+
+def move_credit(pool, added, sha, files):
+    """What a sweep did to files, in the pool of written lines: each written line of code it removed hands its
+    place to a line it added, so the pool never grows. A line only re-spaced hands its place to itself."""
+    for f in files:
+        plus, minus = added.get((sha, f.blob), NO_LINES)
+        moved = 0
+        for h in minus:
+            if moved == len(plus):
+                break
+            if pool[h] > 0:
+                pool[h] -= 1
+                moved += 1
+        pool.update(plus[:moved])
+
+
+def collect(owner, repos, work, since=None):
+    """Every counted file version as (time, language, lines of code), oldest first, plus the times of the
+    owner's commits and of skipped imports, over the whole history; the window is applied afterwards. A file
+    version's lines of code are the lines of code its commit's diff adds (read_added_code); for a repository
+    whose diffs cannot be read, its added lines, comments and blank lines included, counted in code["unread"].
+
+    What is still in use is read at each default branch's head: every line of code there whose text matches a
+    line counted as written since the time since (all time when None), each written line matched at most once
+    across every repository, so what is in use is never more than what was written; split into production and
+    test code. A sweep changes the owner's lines without writing them, so each written line it removes hands its
+    place to one it adds (move_credit): a renamed line is still the owner's, and a reformatted one already
+    matches, spacing aside.
+
+    Only the owner's own commits count (see authorship); others', automation's and copies' add no lines and
+    no commits, and their file versions count as seen, so no later commit is credited with them. A commit
+    held by more than one repository, as in a fork or a mirror, counts once, and so does one change landed
+    twice under new hashes (a cherry-pick, a rebase with the branch kept, an amend still reachable from a
+    tag), known by its author's address, author time and subject. File versions another account wrote,
+    from the template a repository was made from or from coderprint itself in a relay copy, count as seen
+    before anything is read; a commit that adds nothing else is not the owner's work and does not count. A
+    repository that cannot be read, even on a second try, is left out and counted in "unread"."""
+    all_commits, mismatched, unread, ignore = [], 0, 0, set()
+    code, head = {}, {}   # by repository: what each file version adds, and what stands at the head
     for i, r in enumerate(repos):
+        if r.get("isDisabled") or r.get("isLocked"):
+            continue   # counted in the listing, never cloned
+        dest = slot(work, owner, r["name"])
         try:
-            dest = slot(work, owner, r["name"])
-            clone(owner, r["name"], dest)
-            commits, bad = read_commits(dest, i)
-        except RuntimeError as e:
-            raise RuntimeError("repository %d of %d could not be read: %s" % (i + 1, len(repos), e)) from None
+            commits, bad, sweeps = read_repository(owner, r["name"], dest, i)
+            try:   # while the clone is still on disk
+                code[i], head[i] = read_added_code(dest), read_head_code(dest)
+            except RuntimeError:
+                code[i], head[i] = None, None
+        except RuntimeError:
+            unread += 1
+            continue
+        finally:
+            if not os.environ.get("CLONE_CACHE") and os.path.isdir(dest):
+                remove_tree(dest)   # one clone on disk at a time
         all_commits += commits
         mismatched += bad
+        ignore |= sweeps
 
-    seen, shas, events, commit_times, import_times = set(), set(), [], [], []
-    for ts, idx, sha, bot, files in sorted(all_commits, key=lambda c: (c[0], c[1], c[2])):
-        if sha in shas:
+    seeded = set()
+    sources = set(templates(owner).values()) | ({UPSTREAM} if owner.lower() != UPSTREAM.split("/")[0].lower() else set())
+    for k, full_name in enumerate(sorted(sources)):
+        seeded |= seed_blobs(full_name, os.path.join(work, "seed-%d.git" % k)) or set()
+    mine = authorship(owner, all_commits, owner_identity(owner), repos)
+
+    seen, shas, keys = set(seeded), set(), set()
+    events, commit_times, import_times, import_lines = [], [], [], []
+    left_out = Counter()
+    pool = Counter()   # the lines of code counted as written in the window, by line_hash, in every repository
+    holding, writing = set(), set()   # repositories with any file version, and with one not another's
+    for c in sorted(all_commits, key=lambda c: (c.ts, c.repo, c.sha)):
+        if c.sha in shas:
             continue
-        shas.add(sha)
-        fresh = [f for f in files if f[1] != "D" and f[0] not in seen and not f[0].startswith("0000000")]
-        if bot:  # a bot's content still counts as seen, so no later commit is credited with it
-            seen.update(f[0] for f in fresh)
+        shas.add(c.sha)
+        live = [f for f in c.files if f.status != "D" and not f.blob.startswith("0000000")]
+        fresh = [f for f in live if f.blob not in seen]
+        key = (c.email, c.ts, c.subject)
+        copied = bool(live) and all(f.blob in seeded for f in live)
+        if live:
+            holding.add(c.repo)
+            if not copied:
+                writing.add(c.repo)
+        why = ("automation" if c.bot else "others" if mine is not None and (c.repo, c.email) not in mine
+               else "copied" if copied else "landed_twice" if key in keys else None)
+        if why:   # seen all the same, so no later commit is credited with this content
+            seen.update(f.blob for f in fresh)
+            left_out[why] += 1
             continue
-        commit_times.append(ts)
-        if sum(1 for f in fresh if f[1] == "A") > IMPORT_FILES:
-            import_times.append(ts)
-            seen.update(f[0] for f in fresh)
+        keys.add(key)
+        commit_times.append(c.ts)
+        counted = [f for f in fresh if f.added is not None and language_of(f.path)]
+        brought = c.sha not in ignore and sum(1 for f in counted if f.status == "A") > IMPORT_FILES
+        added = code.get(c.repo)
+        in_window = added is not None and (since is None or c.ts >= since)
+        if c.sha in ignore or brought:
+            if brought:   # an existing codebase brought in, not written
+                import_times.append(c.ts)
+                import_lines.append((c.ts, sum(f.added for f in counted)))
+            elif in_window:
+                move_credit(pool, added, c.sha, c.files)
+            seen.update(f.blob for f in fresh)
             continue
-        for blob, status, path, added in fresh:
-            if blob in seen:
+        swept = sweep(counted)
+        if in_window and swept:
+            move_credit(pool, added, c.sha, swept)
+        for f in fresh:
+            if f.blob in seen:
                 continue
-            seen.add(blob)
-            lang = language_of(path)
-            if lang and added:
-                events.append((ts, lang, added))
-    return {"events": events, "commits": commit_times, "imports": import_times, "mismatched": mismatched,
+            seen.add(f.blob)
+            lang = language_of(f.path)
+            if not lang or lang in NOT_CODE or f in swept:
+                continue
+            if added is None:
+                lines = f.added or 0
+            else:
+                plus = added.get((c.sha, f.blob), NO_LINES)[0]
+                lines = len(plus)
+                if in_window:
+                    pool.update(plus)
+            if lines:
+                events.append((c.ts, lang, lines))
+    # what still stands: each line of code at a head that matches a written line not already taken
+    in_use = [0, 0]   # production, tests
+    for i, standing in head.items():
+        if standing is None:
+            continue
+        for (h, test), n in standing.items():
+            taken = min(n, pool[h])
+            if taken:
+                pool[h] -= taken
+                in_use[test] += taken
+    return {"events": events, "commits": commit_times, "imports": import_times, "import_lines": import_lines,
+            "mismatched": mismatched, "unread": unread, "left_out": dict(left_out),
+            "copies": {repos[k]["name"] for k in holding - writing},
+            "code": {"production": in_use[0], "tests": in_use[1], "unread": sum(1 for v in code.values() if v is None)},
             "now": dt.datetime.now(dt.timezone.utc).timestamp()}
 
 
@@ -1237,7 +1793,6 @@ def profile_offset(owner):
     sees it, and only over https from github.com."""
     if not re.fullmatch(r"[A-Za-z0-9-]{1,39}", owner or ""):
         return None
-    import threading   # only this read needs it
     deadline, read = time.monotonic() + PROFILE_TIMEOUT, []
     reader = threading.Thread(target=profile_page, args=(owner, deadline, read), daemon=True)
     reader.start()
@@ -1286,7 +1841,8 @@ def profile_location(owner):
 
 
 def fmt(n):
-    """1,234 as 1.2k, 56,789 as 57k, 1,234,567 as 1.2M; rounded first, so nothing prints as 1000k."""
+    """1,234 as 1.2k, 56,789 as 57k, 1,234,567 as 1.2M, 12,345,678,901 as 12.3B; rounded first, so nothing
+    prints as 1000k or 1000.0M."""
     if n < 1000:
         return str(int(round(n)))
     k = n / 1e3
@@ -1294,11 +1850,13 @@ def fmt(n):
         return "%.1fk" % k
     if round(k) < 1000:
         return "%.0fk" % k
-    return "%.1fM" % (n / 1e6)
+    if round(n / 1e6, 1) < 1000:
+        return "%.1fM" % (n / 1e6)
+    return "%.1fB" % (n / 1e9)
 
 
 def plural(n, word):
-    return "%d %s%s" % (n, word, "" if n == 1 else "s")
+    return "{:,} {}{}".format(n, word, "" if n == 1 else "s")
 
 
 def span_words(S):
@@ -1309,6 +1867,11 @@ def span_words(S):
 
 
 MONTHS = ["JAN", "FEB", "MAR", "APR", "MAY", "JUN", "JUL", "AUG", "SEP", "OCT", "NOV", "DEC"]
+
+
+def day_start(t, zone):
+    """The start of the calendar day in zone that the moment t falls on."""
+    return dt.datetime.fromtimestamp(t, zone).replace(hour=0, minute=0, second=0, microsecond=0).timestamp()
 
 
 def day_label(t, zone):
@@ -2280,24 +2843,203 @@ def bars_key(cx, y, size, box=5, pad=9, gap=12):
     return out
 
 
-def headline_box(x, y, size, s):
-    """Where the headline figure s, drawn at x, y, sits, with 3 units clear all round."""
-    return (x - 3.0, y - 0.72 * size - 3, x + 0.62 * size * len(s) + 3, y + 3.0)
+# ---------------------------------------------------------------- the headline: lines of code
+# Four tiles (in use, production, tests, written), and under them a ring and a bar, each filled with production
+# then tests out of everything written, the ring's middle saying what share is kept. Their story, told as motion
+# for a visitor who allows it, runs STORY seconds from the rest that is the drawing itself: everything written
+# fills in and glows red with its figure; it falls back to what is in use, which glows yellow; to production,
+# green; then tests fill back in, green; and the middle says what each is. Each move takes the seconds between
+# its pair of STORY_ marks, and each glow rises, holds and settles before the next move.
+STORY = 25.0
+STORY_FILL, STORY_UNFILL, STORY_DOWN, STORY_UP = (3.0, 5.0), (8.2, 10.0), (13.2, 14.8), (18.0, 19.6)
+STORY_RISE, STORY_HOLD, STORY_FADE, STORY_SWAP = 0.6, 1.8, 0.8, 0.5
+# Where the headline goes on a panel. kicker: x, y, size. tiles: x0, x1, the figures' baseline and size, the
+# labels' baseline and size, the room left of every figure but the first, the rules' top and bottom. ring: centre,
+# radius, stroke, the middle's size and its word's size (0 for no word). bar: x0, x1, top, height. bars: the
+# activity bars' x0, span, baseline, reach, burst labels' size, and the bottom of the room they keep clear of.
+# dates: the bars' dates' baseline and size, and the key's centre and its swatch, pad and gap.
+Head = namedtuple("Head", "kicker tiles ring bar bars dates")
+WIDE_HEAD = Head((16, 52, 9.5), (16, 280, 82, 22, 95, 7.5, 8, 66, 99), (30, 117, 11, 4.5, 7, 0), (52, 280, 113, 8),
+                 (16, 264.0, 150, 10, BURST_SIZE, 131), (171, 8, (148, 5, 9, 12)))
+
+
+def story_figures():
+    """The headline's figures, (written, in use, production, tests), and production's and in use's shares of
+    what was written, each 0 when nothing was."""
+    q = QUANTITY or {}
+    written, prod, tests = q.get("written", 0), q.get("production", 0), q.get("tests", 0)
+    use = prod + tests
+    if written <= 0:
+        return written, use, prod, tests, 0.0, 0.0
+    shown = min(1.0, use / float(written))
+    return written, use, prod, tests, min(shown, prod / float(written)), shown
+
+
+def kept_shares(P, U):
+    """What is kept, and production's and tests' shares, as whole percentages of what was written, the two
+    parts rounded so they add up to what is kept."""
+    kept = int(round(100 * U))
+    exact = (100 * P, 100 * (U - P))
+    whole = [int(math.floor(v)) for v in exact]
+    for k in sorted(range(2), key=lambda k: exact[k] - whole[k], reverse=True)[:max(0, kept - sum(whole))]:
+        whole[k] += 1
+    return kept, whole[0], whole[1]
+
+
+def keyframes(name, prop, stops):
+    """@keyframes name, prop taking each value at each of its moments (a second, or a tuple of seconds) of STORY."""
+    return "@keyframes %s{%s}" % (name, "".join(
+        "%s{%s:%s}" % (",".join(num(100.0 * t / STORY, 2) + "%" for t in (at if isinstance(at, tuple) else (at,))),
+                       prop, value) for at, value in stops))
+
+
+def quantity_head(g, window):
+    """The headline where g puts it (WIDE_HEAD or COMPACT_HEAD), drawn at rest, and the story's CSS for the panel's
+    style sheet. Every part the story lights has a copy over it, in its color, that fades in and out as a group
+    around its glow: fading a shape inside a filter itself makes Chrome and Edge paint a black tile at the
+    panel's corner."""
+    written, use, prod, tests, P, U = story_figures()
+    kept, prod_pct, tests_pct = kept_shares(P, U)
+    story = written > 0 and U > 0
+    yellow = YELLOW if THEME["dark"] else YELLOW_LITE
+    lit = lambda cls, content: ('<g class="cp-q %s" opacity="0">%s</g>' % (cls, glow("glowG", content))
+                                if story else "")
+    x, y, size = g.kicker
+    out = label(x, y, "lines of code · " + WINDOWS[window][1], size=size)
+
+    x0, x1, figure_y, figure_size, word_y, word_size, pad, rule_top, rule_bottom = g.tiles
+    width = (x1 - x0) / 4.0
+    cells = [(use, "in use", TEXT, "cp-qu", yellow), (prod, "prod", TEXT, "cp-qp", GREEN),
+             (tests, "tests", TEXT, "cp-qt", GREEN), (written, "written", MUTED, "cp-qw", RED)]
+    for i, (n, word, fill, cls, color) in enumerate(cells):
+        tx = x0 + i * width + (pad if i else 0)
+        out += glow("glowW" if i == 0 else "glowS", text(tx, figure_y, fmt(n), figure_size, fill, SANS, 700))
+        out += label(tx, word_y, word, size=word_size) + lit(cls, text(tx, figure_y, fmt(n), figure_size, color, SANS, 700))
+        if i:
+            out += '<line x1="%s" y1="%s" x2="%s" y2="%s" stroke="%s"/>' % (
+                num(x0 + i * width), num(rule_top), num(x0 + i * width), num(rule_bottom), LINE)
+
+    # the bar: lines with round ends, so a length is a dash; each fill runs from the bar's left end
+    bx0, bx1, by, bh = g.bar
+    W, yc = bx1 - bx0, by + bh / 2.0
+    D = W - bh
+    dash = lambda f: max(0.01, f * W - bh)          # the dash that shows fraction f of the bar
+    off = lambda f: D - dash(f)                       # and its offset under a dash of the whole length
+    whole = "%s %s" % (num(D, 2), num(2 * W, 2))
+
+    def line(color, pattern, offset, cls=""):
+        return ('<line%s x1="%s" y1="%s" x2="%s" y2="%s" stroke="%s" stroke-width="%s" stroke-linecap="round" '
+                'stroke-dasharray="%s" stroke-dashoffset="%s"/>'
+                % (' class="cp-q %s"' % cls if cls else "", num(bx0 + bh / 2), num(yc), num(bx1 - bh / 2), num(yc),
+                   color, num(bh), pattern, num(offset, 2)))
+    out += '<rect x="%s" y="%s" width="%s" height="%s" rx="%s" fill="%s"/>' % (num(bx0), num(by), num(W), num(bh),
+                                                                                num(bh / 2), LINE)
+    if U > 0:
+        out += line(DIM, whole, off(U), "cp-qbs" if story else "")                 # everything written, filled
+        out += glow("glowS", line(MUTED, whole, off(U), "cp-qbt" if story else ""))  # tests
+        if P > 0:
+            out += glow("glowS", line(TEXT, whole, off(P)))                        # production
+    out += lit("cp-qw", line(RED, whole, 0)) + lit("cp-qu", line(yellow, "%s %s" % (num(dash(U), 2), num(2 * W, 2)), 0))
+    if P > 0:
+        out += lit("cp-qp", line(GREEN, "%s %s" % (num(dash(P), 2), num(2 * W, 2)), 0))
+    if U > P:
+        out += lit("cp-qt", line(GREEN, "%s %s" % (num(max(0.01, (U - P) * W - bh), 2), num(2 * W, 2)), -P * W))
+
+    # the ring: the same layers around a circle turned to start at the top
+    cx, cy, r, sw, middle_size, middle_word = g.ring
+    C = 2 * math.pi * r
+    roff = lambda f: C * (1 - f)
+
+    def ring(color, pattern, offset, cls=""):
+        return ('<circle%s cx="%s" cy="%s" r="%s" fill="none" stroke="%s" stroke-width="%s" stroke-linecap="round" '
+                'stroke-dasharray="%s" stroke-dashoffset="%s" transform="rotate(-90 %s %s)"/>'
+                % (' class="cp-q %s"' % cls if cls else "", num(cx), num(cy), num(r), color, num(sw), pattern,
+                   num(offset, 2), num(cx), num(cy)))
+    full = "%s %s" % (num(C - sw, 2), num(2 * C, 2))
+    out += '<circle cx="%s" cy="%s" r="%s" fill="none" stroke="%s" stroke-width="%s"/>' % (num(cx), num(cy), num(r),
+                                                                                            LINE, num(sw))
+    if U > 0:
+        out += ring(DIM, full, roff(U), "cp-qrs" if story else "")
+        out += glow("glowS", ring(MUTED, full, roff(U), "cp-qrt" if story else ""))
+        if P > 0:
+            out += glow("glowS", ring(TEXT, full, roff(P)))
+    out += lit("cp-qw", '<circle cx="%s" cy="%s" r="%s" fill="none" stroke="%s" stroke-width="%s"/>'
+               % (num(cx), num(cy), num(r), RED, num(sw)))
+    out += lit("cp-qu", ring(yellow, "%s %s" % (num(max(0.01, U * C - sw), 2), num(2 * C, 2)), 0))
+    if P > 0:
+        out += lit("cp-qp", ring(GREEN, "%s %s" % (num(max(0.01, P * C - sw), 2), num(2 * C, 2)), 0))
+    if U > P:
+        out += lit("cp-qt", ring(GREEN, "%s %s" % (num(max(0.01, (U - P) * C - sw), 2), num(2 * C, 2)), -P * C))
+
+    # the ring's middle: what is kept at rest, and in the story, 100%, then kept, then production, then tests
+    def middle(cls, share, word, shown):
+        if not story and not shown:
+            return ""
+        fy = cy + middle_size * (0.2 if middle_word else 0.36)
+        s = glow("glowS", text(cx, fy, "%d%%" % share, middle_size, TEXT, SANS, 700, "middle"))
+        if middle_word and word:
+            s += label(cx, fy + middle_word + 6, word, "middle", size=middle_word)
+        if not story:
+            return s
+        return '<g class="cp-q %s"%s>%s</g>' % (cls, "" if shown else ' opacity="0"', s)
+    out += middle("cp-qmk", kept, "kept", True) + middle("cp-qmw", 100, None, False)
+    out += middle("cp-qmp", prod_pct, "prod", False) + middle("cp-qmt", tests_pct, "tests", False)
+    if not story:
+        return out, ""
+
+    # the story: each move between its marks, each glow rising, holding and settling after its move
+    bar_at = lambda f: num(off(f), 2)
+    ring_at = lambda f: num(roff(f), 2)
+    fill = lambda at: [((0, STORY_FILL[0]), at(U)), ((STORY_FILL[1], STORY_UNFILL[0]), at(1.0)),
+                       ((STORY_UNFILL[1], STORY_DOWN[0]), at(U)), ((STORY_DOWN[1], STORY_UP[0]), at(P)),
+                       ((STORY_UP[1], STORY), at(U))]
+    parts = lambda at: [((0, STORY_DOWN[0]), at(U)), ((STORY_DOWN[1], STORY_UP[0]), at(P)), ((STORY_UP[1], STORY), at(U))]
+    pulse = lambda t: [((0, t), 0), ((t + STORY_RISE, t + STORY_RISE + STORY_HOLD), 1),
+                       ((t + STORY_RISE + STORY_HOLD + STORY_FADE, STORY), 0)]
+    swap = STORY_SWAP
+    tests_end = STORY_UP[1] + STORY_RISE + STORY_HOLD + STORY_FADE
+    rules = [
+        ("cp-qbs", "stroke-dashoffset", fill(bar_at)), ("cp-qbt", "stroke-dashoffset", parts(bar_at)),
+        ("cp-qrs", "stroke-dashoffset", fill(ring_at)), ("cp-qrt", "stroke-dashoffset", parts(ring_at)),
+        ("cp-qw", "opacity", pulse(STORY_FILL[1])), ("cp-qu", "opacity", pulse(STORY_UNFILL[1])),
+        ("cp-qp", "opacity", pulse(STORY_DOWN[1])), ("cp-qt", "opacity", pulse(STORY_UP[1])),
+        ("cp-qmk", "opacity", [((0, STORY_FILL[0]), 1), ((STORY_FILL[0] + swap, STORY_UNFILL[1] - swap), 0),
+                               ((STORY_UNFILL[1], STORY_DOWN[0]), 1), ((STORY_DOWN[0] + swap, tests_end), 0),
+                               ((tests_end + swap, STORY), 1)]),
+        ("cp-qmw", "opacity", [((0, STORY_FILL[1] - swap), 0), ((STORY_FILL[1], STORY_UNFILL[0]), 1),
+                               ((STORY_UNFILL[0] + swap, STORY), 0)]),
+        ("cp-qmp", "opacity", [((0, STORY_DOWN[1] - swap), 0), ((STORY_DOWN[1], STORY_UP[0]), 1),
+                               ((STORY_UP[0] + swap, STORY), 0)]),
+        ("cp-qmt", "opacity", [((0, STORY_UP[1] - swap), 0), ((STORY_UP[1], tests_end), 1), ((tests_end + swap, STORY), 0)]),
+    ]
+    css = "".join(keyframes(name, prop, stops) + ".%s{animation:%s %ss ease-in-out infinite}" % (name, name, num(STORY))
+                  for name, prop, stops in rules)
+    return out, css
+
+
+def headline_block(g, window, S, spark, since, commits, right, divider):
+    """The headline (quantity_head), and under it the activity bars with their bursts, their dates and their key.
+    right: where the bars' right date ends; divider: the wide panel's rule between the headline and the rows,
+    or "". Returns the drawing and the story's CSS."""
+    out, story = quantity_head(g, window)
+    x0, span, base, reach, burst_size, keep_clear = g.bars
+    bars, tops = activity_bars(spark, commits, x0, span, base, reach)
+    out += glow("glowG", bars) + burst_labels(spark, tops, [(0, 0, right + 12, keep_clear)], x0, span, burst_size)
+    y, size, (key_x, box, pad, gap) = g.dates
+    out += label(x0, y, since or span_words(S), size=size) + label(right, y, AS_OF or "today", "end", size=size)
+    if commits and any(commits):   # the key, between the start and today
+        out += bars_key(key_x, y, size, box, pad, gap)
+    return out + divider, story
 
 
 def stats_block(window, S, new_lines, spark, rows, since=None, commits=None):
-    """The headline, the activity bars with their bursts, and the stats rows. since: the day the bars
-    start, written out; without it, how long ago. commits: commits per bar. Lines rise in green above the
-    bars' baseline and commits hang in red below it, each scaled to its own peak."""
-    out = label(16, 52, "new lines written · " + WINDOWS[window][1])
-    out += glow("glowW", text(15, 94, fmt(new_lines), 40, TEXT, SANS, 700))
-    bars, tops = activity_bars(spark, commits)
-    out += glow("glowG", bars) + burst_labels(spark, tops, [headline_box(15, 94, 40, fmt(new_lines))])
-    out += label(16, 158, since or span_words(S), size=8) + label(280, 158, "today", "end", size=8)
-    if commits and any(commits):   # the key, between the start and today
-        out += bars_key(148, 158, 8)
-    out += '<line x1="292" y1="42" x2="292" y2="156" stroke="%s"/>' % LINE
-    return out + stats_rows(rows)
+    """The headline and its bars (headline_block), the column rule and the stats rows. since: the day the bars
+    start, written out; without it, how long ago. commits: commits per bar. Lines of code rise in green above
+    the bars' baseline and commits hang in red below it, each scaled to its own peak. Returns the drawing and
+    the story's CSS."""
+    out, story = headline_block(WIDE_HEAD, window, S, spark, since, commits, 280,
+                                '<line x1="292" y1="42" x2="292" y2="156" stroke="%s"/>' % LINE)
+    return out + stats_rows(rows), story
 
 
 def stats_rows(rows):
@@ -2399,15 +3141,17 @@ MIN_CONTRAST = 1.35    # the now line gets a dark casing across any band it woul
 
 
 def empty_words(window, has_history):
-    """What the chart says when the window holds no lines."""
-    return "nothing in the last " + WINDOWS[window][1] if has_history else "no code yet"
+    """What the chart says when the window holds no lines: that older work exists, or that the account's own
+    repositories hold none that counts (its commits may still be there, in notebooks or data, or its code in
+    repositories it does not own)."""
+    return "nothing in the last " + WINDOWS[window][1] if has_history else "no counted code in own repos"
 
 
 def stream_block(window, stream, column, S, c, has_history, recent_day=None):
     """The language mix on the log axis, flowing into a column for the whole window that is also the
     legend. stream: (age in days, language, lines) within the chart's span; column: every line in the
     window, strays included. Returns the drawing and the Pareto line's keyframes."""
-    out = label(16, 192, "language mix · share of new lines") + window_selector(window)
+    out = label(16, 192, "language mix · share of lines of code") + window_selector(window)
     if not stream:
         return out + text(222, 300, empty_words(window, has_history), 12, MUTED, MONO, 400, "middle"), ""
     chart, grow, order, shown = mix_chart(stream, column, S, c, recent_day)
@@ -2560,17 +3304,23 @@ def folded(column):
 def words(window, new_lines, spark, rows, column, since=None):
     """The panel's title and description for screen readers, in sentences, every number one it draws."""
     span = "all time" if window == "all" else "the last " + WINDOWS[window][1]
-    title = "coderprint: %s new lines written, %s" % (fmt(new_lines), span)
+    written, use, prod, tests, _, _ = story_figures() if QUANTITY else (new_lines, 0, 0, 0, 0, 0)
+    title = "coderprint: %s lines of code in use, of %s written, %s" % (fmt(use), fmt(written), span)
     phrases = {"commits · all branches": "{v} commits across all branches", "active days": "{v} active days",
                "longest streak": "a longest streak of {v}", "current streak": "a current streak of {v}",
                "languages written": "{v} languages written"}
-    stats = [phrases.get(name, name + " {v}").format(v=value) for name, value in rows]
-    desc = "%s new lines written (%s%s)" % ("{:,}".format(new_lines), span, ", charted since %s" % since if since else "")
+    one = {"commits · all branches": "1 commit across all branches", "active days": "1 active day",
+           "languages written": "1 language written"}
+    stats = [one[name] if value == "1" and name in one else phrases.get(name, name + " {v}").format(v=value)
+             for name, value in rows]
+    desc = "%s lines of code in use (%s in production, %s in tests), of %s written (%s%s)" % (
+        "{:,}".format(use), "{:,}".format(prod), "{:,}".format(tests), "{:,}".format(written), span,
+        ", charted since %s" % since if since else "")
     desc += (": " + ", ".join(stats[:-1]) + (", and " if len(stats) > 1 else "") + stats[-1] + ".") if stats else "."
     groups = bursts(spark)
     if len(groups) > 1:
         sizes = [fmt(g[2]) for g in groups]
-        desc += " They came in %d bursts of %s and %s lines." % (len(groups), ", ".join(sizes[:-1]), sizes[-1])
+        desc += " They came in %d bursts of %s and %s lines of code." % (len(groups), ", ".join(sizes[:-1]), sizes[-1])
     totals, _ = folded(column)
     if totals:
         top = [l for l, _ in totals.most_common() if l != OTHER][:TOP_N]
@@ -2580,7 +3330,7 @@ def words(window, new_lines, spark, rows, column, since=None):
             amount[OTHER] = rest
         grand = float(sum(amount.values()))
         shown = percents({l: v / grand for l, v in amount.items()})
-        desc += " Share of new lines by language: %s." % ", ".join(
+        desc += " Share of lines of code by language: %s." % ", ".join(
             "%s %s" % ("other languages" if l == OTHER else l, shown[l].replace("<1%", "under 1%"))
             for l in sorted(amount, key=lambda l: (l == OTHER, -amount[l])))
     return title, desc
@@ -2593,8 +3343,10 @@ def alt_text(window, new_lines, rows):
 
 
 def caption_parts(private):
-    return ["public + private repos" if private else "public repos", "language by file type",
-            "each line counted once"]
+    """What the panel counts, in three parts, each short enough for a line of the compact caption and all three
+    for one line of the wide one: whose repositories, which of them, and what a line is (a line added in a new
+    file version, so a rewrite counts again)."""
+    return ["own repos, no forks", "public + private" if private else "public only", "each file version counted once"]
 
 
 def panel_svg(theme, window, S, c, new_lines, spark, rows, stream, column, has_history, mark_polys, turn,
@@ -2603,14 +3355,15 @@ def panel_svg(theme, window, S, c, new_lines, spark, rows, stream, column, has_h
     (see day_label); commits: commits in each of the activity bars' slices."""
     use_theme(theme)
     chart, grow = stream_block(window, stream, column, S, c, has_history, recent_day)
+    block, story = stats_block(window, S, new_lines, spark, rows, since, commits)
     body = (flattened_mark(mark_polys, turn)
             + theme_strip(theme)
-            + stats_block(window, S, new_lines, spark, rows, since, commits)
+            + block
             + '<line x1="16" y1="176" x2="560" y2="176" stroke="%s"/>' % LINE
             + chart
             + label(16, 437, " · ".join(caption_parts(private)), size=7.5)
             + wordmark(word))
-    return document(body, rows, grow, words(window, new_lines, spark, rows, column, since))
+    return document(body, rows, grow + story, words(window, new_lines, spark, rows, column, since))
 
 
 # The panel's corners are rounded, bar the bottom two when SQUARE_FOOT is set: the compact panel's, which
@@ -2654,12 +3407,14 @@ def document(body, rows, grow, title_desc):
 # that must be read is under 10 units. It is drawn by the wide panel's own functions, with the geometry in
 # COMPACT swapped in for the wide panel's while it is drawn and put back whatever happens. Its height is
 # the same for every history: a row that a history does not fill is left empty.
-COMPACT_W, COMPACT_H = 360, 686
+COMPACT_W, COMPACT_H = 360, 686   # COMPACT_H: the panel under its headline, before COMPACT_HEAD_SHIFT
+COMPACT_HEAD_SHIFT = 120          # how far the headline moves the rest down: whole grid cells, 5 of 24
 COMPACT_TYPE = 10.5    # the chrome: the theme strip, the headline's label, the stats' names, the selector
 COMPACT_SMALL = 10     # the ticks, the gutter, the bursts, the bars' dates and key, and the caption
-# The activity bars beside the headline: their baseline, where the green of the tallest slice lines up with
-# the top of the figure, and how far a bar reaches from it each way at its peak, as on the wide panel.
-COMPACT_BAR_BASE, COMPACT_BAR_REACH = 96, 20
+# The headline across the phone's width (see WIDE_HEAD for what each number is): the tiles, then the ring
+# beside the bar, then the activity bars, their dates and key under them.
+COMPACT_HEAD = Head((14, 56, COMPACT_TYPE), (14, 346, 100, 28, 120, 9, 10, 78, 126), (44, 160, 26, 7, 12, 7),
+                    (84, 346, 154, 12), (14, 332.0, 218, 16, COMPACT_SMALL, 193), (252, COMPACT_SMALL, (180, 7, 11, 14)))
 # The watermark moves from the wide panel's spot by whole grid cells, so the grid drawn into it lines up
 # with the panel's and it is the wide panel's raster, moved; its limits move with it and keep clear of
 # this panel's corners.
@@ -2673,7 +3428,7 @@ COMPACT_SHIFT = (-9 * 24, 10 * 24)
 # grid and the vignette (document). The bars and their key read none of these: the compact headline passes
 # its bars' baseline and reach, and its key's size, as arguments.
 COMPACT = dict(
-    PANEL_W=COMPACT_W, PANEL_H=COMPACT_H, SQUARE_FOOT=True,
+    PANEL_W=COMPACT_W, PANEL_H=COMPACT_H + COMPACT_HEAD_SHIFT, SQUARE_FOOT=True,
     X0=40, X1=304, XC=328, XW=346, T0=334, T1=494, AXIS_Y=508, TICK_Y=523, PLOT_W=304 - 40,
     TICK_CHAR=char_width(COMPACT_SMALL), G_MIN=2 * char_width(COMPACT_SMALL),
     MARK_CENTRE=(MARK_CENTRE[0] + COMPACT_SHIFT[0], MARK_CENTRE[1] + COMPACT_SHIFT[1]),
@@ -2686,23 +3441,9 @@ COMPACT = dict(
 
 
 def compact_headline(window, S, new_lines, spark, since=None, commits=None):
-    """The headline with the activity bars beside it, as far right as the figure allows: each slice's lines
-    rise in green and its commits hang in red, the bursts are labelled over the green, and under the bars
-    are the day they start and today. The key has a row of its own under those, centred on the bars, since
-    beside the headline there is no room for it between the start and today."""
-    head, kicker = fmt(new_lines), "new lines written · " + WINDOWS[window][1]
-    out = label(14, 56, kicker, size=COMPACT_TYPE)
-    out += glow("glowW", text(13, 106, head, 42, TEXT, SANS, 700))
-    box = headline_box(13, 106, 42, head)
-    x0 = max(132.0, box[2] + 9)
-    kicker_box = (11.0, 56 - 0.72 * COMPACT_TYPE - 3, 14 + char_width(COMPACT_TYPE) * len(kicker) + 3, 59.0)
-    bars, tops = activity_bars(spark, commits, x0, 346 - x0, COMPACT_BAR_BASE, COMPACT_BAR_REACH)
-    out += glow("glowG", bars) + burst_labels(spark, tops, [box, kicker_box], x0, 346 - x0, COMPACT_SMALL)
-    out += (label(x0, 131, since or span_words(S), size=COMPACT_SMALL)
-            + label(346, 131, "today", "end", size=COMPACT_SMALL))
-    if commits and any(commits):
-        out += bars_key((x0 + 346) / 2, 146, COMPACT_SMALL, 7, 11, 14)
-    return out
+    """The headline and its bars (headline_block) across the full width, for phones. Returns the drawing and the
+    story's CSS."""
+    return headline_block(COMPACT_HEAD, window, S, spark, since, commits, 346, "")
 
 
 def compact_legend(order, shown, top=550, pitch=17):
@@ -2728,9 +3469,10 @@ def compact_panel_svg(theme, window, S, c, new_lines, spark, rows, stream, colum
     globals().update(COMPACT)
     try:
         use_theme(theme)
+        head, story = compact_headline(window, S, new_lines, spark, since, commits)
+        # everything under the headline is laid out as it was before the headline grew, and moved down by whole
+        # grid cells, so the watermark's own copy of the grid still lines up with the panel's
         body = (flattened_mark(mark_polys, turn)
-                + theme_strip(theme, 28, COMPACT_TYPE)
-                + compact_headline(window, S, new_lines, spark, since, commits)
                 + '<line x1="14" y1="158" x2="346" y2="158" stroke="%s"/>' % LINE
                 + stats_rows(rows)
                 + '<line x1="14" y1="294" x2="346" y2="294" stroke="%s"/>' % LINE
@@ -2745,7 +3487,9 @@ def compact_panel_svg(theme, window, S, c, new_lines, spark, rows, stream, colum
         for i, part in enumerate(caption_parts(private)):
             body += label(14, 646 + 13 * i, part, size=COMPACT_SMALL)
         body += wordmark(word)
-        return document(body, rows, grow, words(window, new_lines, spark, rows, column, since))
+        body = (theme_strip(theme, 28, COMPACT_TYPE) + head
+                + '<g transform="translate(0,%d)">%s</g>' % (COMPACT_HEAD_SHIFT, body))
+        return document(body, rows, grow + story, words(window, new_lines, spark, rows, column, since))
     finally:
         globals().update(saved)
 
@@ -2858,6 +3602,17 @@ def stop_on_term(*_):
     raise Stopped("stopped by the step's time limit")
 
 
+def time_limit():
+    """The run's deadline from CARDS_TIME_LIMIT, the seconds its step allows (action.yml passes the
+    time-limit input), or None to run without one. Each command then gets only what is left (see run)."""
+    limit = os.environ.get("CARDS_TIME_LIMIT", "").strip()
+    if not limit:
+        return None
+    if not limit.isdigit() or not 300 <= int(limit) <= 86400:
+        raise RuntimeError("CARDS_TIME_LIMIT must be a whole number of seconds from 300 to 86400")
+    return time.monotonic() + int(limit)
+
+
 def own_card_only(owner):
     """A card is its owner's own resume, drawn by the owner's choice. In Actions the account reported on
     must be the one the workflow's repository belongs to, so no one runs coderprint from their repository
@@ -2868,8 +3623,10 @@ def own_card_only(owner):
 
 
 def main():
+    global DEADLINE, AS_OF, QUANTITY
     signal.signal(signal.SIGTERM, stop_on_term)   # unwinds through the clean-up below instead of dying
     window, pin, music, relay, mark_polys, turn, word = settings()
+    DEADLINE = time_limit()
     owner = owner_login()
     own_card_only(owner)
     light, dark = todays_themes(pin)   # keys of THEMES: today's theme's lite and nite
@@ -2905,7 +3662,6 @@ def main():
 
     new_readme(readme_block(ALT))   # read before any cloning, so a README problem fails early
     repos = list_repositories(owner)
-    private = sum(1 for r in repos if r["isPrivate"])
 
     meta_path = os.path.join(OUT_DIR, "cards.json")
     before = previous_meta(meta_path)
@@ -2919,16 +3675,37 @@ def main():
     work = os.environ.get("CLONE_CACHE") or tempfile.mkdtemp(prefix="cards-")
     os.makedirs(work, exist_ok=True)
     try:
-        data = collect(owner, repos, work)
+        back = WINDOWS[window][2]   # what is still in use counts what was written inside the window
+        data = collect(owner, repos, work, time.time() - back * 86400 if back else None)
     finally:
         if not os.environ.get("CLONE_CACHE"):
             remove_tree(work)
+    readable = sum(1 for r in repos if not (r.get("isDisabled") or r.get("isLocked")))
+    if data["unread"]:
+        say("::warning::%d of %d repositories could not be read, even on a second try, and %s left out of the panel"
+            % (data["unread"], readable, "is" if data["unread"] == 1 else "are"))
+        if data["unread"] > max(1, int(UNREAD_SHARE * readable)):
+            say("That is too many to draw without, so the existing panels are kept. The next run tries again.")
+            return 1
+    # a repository holding only others' file versions (a relay copy) makes nothing of the owner's private
+    private = sum(1 for r in repos if r["isPrivate"] and r["name"] not in data["copies"])
 
     now, days_back = data["now"], WINDOWS[window][2]
-    events = [e for e in data["events"] if e[0] <= now + FUTURE_SLACK]
-    commit_times = [t for t in data["commits"] if t <= now + FUTURE_SLACK]
+    # The zone comes first: every time is moved to the start of its own day there, so nothing drawn or written
+    # tells when in a day anyone worked. Without that, the chart's last day, drawn hours wide, and cards.json
+    # together placed each commit of the past week within half an hour.
+    shown = profile_offset(owner)
+    offset, seen = shown if shown else (None, None)
+    zone = local_zone(offset, profile_location(owner), now, seen)
+    if not zone_database():   # said whatever the profile shows, so the line tells a reader nothing about it
+        say("note: this Python has no time zone database (pip install tzdata), so days are counted in UTC "
+            "or at a fixed offset")
+    AS_OF = day_label(now, zone)
+    events = [(day_start(t, zone), lang, n) for t, lang, n in data["events"] if t <= now + FUTURE_SLACK]
+    commit_times = [day_start(t, zone) for t in data["commits"] if t <= now + FUTURE_SLACK]
     start = now - days_back * 86400 if days_back else float("-inf")
     column = [(max(0.0, (now - t) / 86400.0), lang, n) for t, lang, n in events if t >= start]
+    dated = [t for t in commit_times if t >= start]
     recent_day = None
     if column:
         oldest, newest, recent_day = real_work(column)
@@ -2936,6 +3713,11 @@ def main():
         if days_back:
             S = min(S, float(days_back))
         c = knee(newest, S)
+    elif dated:   # commits but no counted lines (notebooks, data): the bars still span the commits
+        S = max(0.05, (now - min(dated)) / 86400.0)
+        if days_back:
+            S = min(S, float(days_back))
+        c = knee(max(0.0, (now - max(dated)) / 86400.0), S)
     else:
         S, c = float(days_back or 1), 1.0
     stream = [e for e in column if e[0] <= S]
@@ -2947,22 +3729,19 @@ def main():
         age = max(0.0, (now - t) / 86400.0)
         if age <= S:
             commits[min(51, int((S - age) / S * 52))] += 1
-    shown = profile_offset(owner)
-    offset, seen = shown if shown else (None, None)
-    zone = local_zone(offset, profile_location(owner), now, seen)
-    if not zone_database():   # said whatever the profile shows, so the line tells a reader nothing about it
-        say("note: this Python has no time zone database (pip install tzdata), so days are counted in UTC "
-            "or at a fixed offset")
-    active, longest, current = activity([t for t in commit_times if t >= start], now, zone)
+    active, longest, current = activity(dated, now, zone)
     rows = [
-        ("commits · all branches", "{:,}".format(sum(1 for t in commit_times if t >= start))),
-        ("active days", str(active)),
+        ("commits · all branches", "{:,}".format(len(dated))),
+        ("active days", "{:,}".format(active)),
         ("longest streak", plural(longest, "day")),
         ("current streak", plural(current, "day")),
-        ("languages written", str(len({l for _, l, _ in column if l != OTHER and l not in PROSE}))),
+        # every language at 1% or more of the window's lines, as the chart draws them, named in the legend or not
+        ("languages written", str(sum(1 for l in folded(column)[0] if l != OTHER and l not in PROSE))),
     ]
 
-    since = day_label(now - S * 86400, zone) if column and S >= 1 else None
+    loc = data.get("code") or {}
+    QUANTITY = {"written": new_lines, "production": loc.get("production", 0), "tests": loc.get("tests", 0)}
+    since = day_label(now - S * 86400, zone) if (column or dated) and S >= 1 else None
     readme = new_readme(readme_block(esc(alt_text(window, new_lines, rows))))
     panels = [("panel-light.svg", light, panel_svg), ("panel-dark.svg", dark, panel_svg),
               ("panel-compact-light.svg", light, compact_panel_svg),
@@ -2974,10 +3753,15 @@ def main():
     palette = lambda t: {k: THEMES[t][k] for k in ("bg", "text", "muted", "line")}
     meta = {
         "generated": dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%dT%H:%MZ"), "window": window,
-        "span_days": round(S, 2), "repositories": len(repos), "private_repositories": private,
+        "span_days": int(round(S)), "repositories": len(repos),
         "commits": int(rows[0][1].replace(",", "")), "new_lines": new_lines,
-        "imports_skipped": sum(1 for t in data["imports"] if t >= start), "unparsed_commits": data["mismatched"],
-        "future_dated_left_out": len(data["events"]) - len(events),
+        "lines_of_code": {"written": new_lines, "in_use": QUANTITY["production"] + QUANTITY["tests"],
+                          "production": QUANTITY["production"], "tests": QUANTITY["tests"],
+                          "repositories_counted_without_diffs": loc.get("unread", 0)},
+        "imports_skipped": sum(1 for t in data["imports"] if t >= start),
+        "lines_skipped_as_import": sum(n for t, n in data["import_lines"] if t >= start),
+        "commits_left_out": data["left_out"], "repositories_unread": data["unread"],
+        "unparsed_commits": data["mismatched"], "future_dated_left_out": len(data["events"]) - len(events),
         "theme": theme_of(light), "themes": {"light": light, "dark": dark},
         "palette": {"light": palette(light), "dark": palette(dark)},
     }
@@ -2998,10 +3782,12 @@ def main():
         write_all(files)
     except OSError:
         raise RuntimeError("the panel files could not be written") from None
-    say("panels written (%s, %s, %s): %d repositories, %s commits, %s new lines, chart over %s, %d import "
-        "commits skipped, %d commits unparsed" % (light, dark, window, len(repos), rows[0][1], fmt(new_lines),
-                                                   plural(math.ceil(S - 1e-9), "day"), meta["imports_skipped"],
-                                                   data["mismatched"]))
+    say("panels written (%s, %s, %s): %d repositor%s, %s commits, lines of code %s written and %s in use (%s "
+        "production, %s tests), chart over %s, %d import commits skipped, %d commits unparsed, commits left out: %s"
+        % (light, dark, window, len(repos), "y" if len(repos) == 1 else "ies", rows[0][1], fmt(new_lines),
+           fmt(QUANTITY["production"] + QUANTITY["tests"]), fmt(QUANTITY["production"]), fmt(QUANTITY["tests"]),
+           plural(math.ceil(S - 1e-9), "day"), meta["imports_skipped"], data["mismatched"],
+           ", ".join("%d %s" % (n, why.replace("_", " ")) for why, n in sorted(data["left_out"].items())) or "none"))
     return 0
 
 

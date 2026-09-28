@@ -57,10 +57,10 @@ A vulnerability is a way to break one of these promises. Each is kept in the cod
 
 **The Action**
 
-- It never prints or writes a repository name, a file path or a commit message. Action logs on a public repository are public, so a leak of any of these, above all the name of a private repository, is a vulnerability. The panels and `assets/cards.json` hold totals only. A failed command reports only the program's name, never its arguments (`run` in `coderprint.py`).
+- It never prints or writes a repository name, a file path, a commit message or an email address. Action logs on a public repository are public, so a leak of any of these, above all the name of a private repository, is a vulnerability. The panels and `assets/cards.json` hold totals only, and only by whole days, so they never tell what time of day anyone worked. A failed command reports only the program's name, never its arguments (`run` in `coderprint.py`).
 - The token never appears on a command line. `git` receives it through an environment-only header (`git_auth`), and the README's setup gives it a GitHub App token limited to reading contents and metadata that expires within the hour.
 - Every Action input reaches the script through an environment variable, never pasted into the shell script, so an input cannot run commands (`action.yml`).
-- Clones live in a temporary folder that is deleted when the run ends, including when the time limit stops it, unless the `CLONE_CACHE` setting for local runs keeps them.
+- Each clone is deleted as soon as it has been read, and the temporary folder when the run ends, including when the time limit stops it, unless the `CLONE_CACHE` setting for local runs keeps them.
 - It draws a card only for the account whose repository it runs in (`own_card_only`), so no one can run it from their repository over someone else's account.
 - It reads the owner's public profile page only from `github.com` over Hypertext Transfer Protocol Secure (HTTPS), and refuses a redirect to any other host (`GitHubOnly`).
 - The watermark is meant to come from a secret, and the Action never writes its path data to the repository. `mark_outline` accepts only straight segments, at most 48 kilobytes, with bounded coordinates.

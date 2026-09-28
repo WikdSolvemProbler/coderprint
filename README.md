@@ -1,7 +1,7 @@
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/WikdSolvemProbler/WikdSolvemProbler/HEAD/assets/panel-dark.svg">
   <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/WikdSolvemProbler/WikdSolvemProbler/HEAD/assets/panel-light.svg">
-  <img width="100%" alt="A coderprint panel: new lines written, commit activity and the language mix over time" src="https://raw.githubusercontent.com/WikdSolvemProbler/WikdSolvemProbler/HEAD/assets/panel-dark.svg">
+  <img width="100%" alt="A coderprint panel: lines of code written and still in use, commit activity and the language mix over time" src="https://raw.githubusercontent.com/WikdSolvemProbler/WikdSolvemProbler/HEAD/assets/panel-dark.svg">
 </picture>
 
 # coderprint
@@ -10,7 +10,8 @@ Your code's fingerprint on your GitHub profile: how much you actually wrote, how
 
 ## What it shows
 
-- **New lines written** over the window you pick. Under the total, 52 bars split the chart's span: each slice's lines rise in green and its commits hang below in red, each scaled to its own peak, and the biggest bursts of work carry their own totals. The bars start on the day your real work did.
+- **Lines of code**, as four figures: how many of the lines you wrote in the window you pick are still **in use**, split into **prod** (production code) and **tests**, beside everything **written**. A ring and a bar show the same split as shares of what you wrote, production drawn bright and tests dimmer, and the ring's middle says what share you kept. For visitors who allow motion they tell it as a story, slowly enough to follow: both fill to everything written and glow red with its figure, fall back to what is in use and glow yellow, fall to production and glow green, then fill back in with tests, green again, the ring's middle naming each step.
+- **Activity** under them: 52 bars split the chart's span, each slice's lines of code rising in green and its commits hanging below in red, each scaled to its own peak, and the biggest bursts of work carry their own totals. The bars start on the day your real work did and end on the day the card was drawn, so a card that has stopped refreshing shows its date.
 - **Commits** on every branch, **active days** and your **longest** and **current streak** (days with a commit, counted in your own time zone when your profile shows one, see below), and how many **languages** you wrote. One green dot at a time hops along these rows, and each number lights as the dot reaches it.
 - **The language mix over time.** Days before today run along a log scale, so last week gets room and last year still fits. Quiet stretches are veiled by how little evidence they rest on, and the mix eases across them instead of jumping. The stream flows into a column that is also the legend: your eight biggest languages by name, the rest as Other.
 - **A red Pareto line** over the stream: the running share of every line in the chart, from 0% at its left edge to 100% today. It draws itself, fast where you wrote fast and slow across quiet time.
@@ -22,9 +23,24 @@ Motion only ever adds to a finished panel. A visitor whose device asks for reduc
 
 ## How it counts
 
-A file version counts once, the first time its exact content appears in any of your repositories or branches. Copies, moves, merges, branch landings and imports from one repository to another reuse content that already exists, so they add nothing. A commit that adds more than 500 new files is treated as bringing in an existing codebase and skipped, as are commits by bots. Vendored folders, generated output, lockfiles and data files never count. Commits dated in the future (a wrong clock) are left out.
+coderprint reads every branch of every repository your account owns, forks left out; the `gh-pages` branch is read only when it is the default. It counts lines of code only. A blank line is not code, and neither is a line that is only a comment, recognized by each language's own comment syntax; a line of code with a comment after it is code. Prose and data are never code: Markdown, TeX, YAML, TOML, plain text, and any file whose name or extension no language claims.
 
-A file's language comes from its extension, and an extension coderprint does not know counts as Other. The chart names at most eight languages; the rest, and any language under 1% of the window's lines, are drawn as Other, so the legend lists only what can be seen. The languages count in the stats covers every language coderprint recognizes in your window, named on the chart or not, except Markdown, which is prose.
+**Written** is every line of code added in a new file version, and each file version counts once, the first time its exact content appears in any of your repositories or branches. Copies, moves, merges, branch landings and imports from one repository to another reuse content that already exists, so they add nothing. A rewrite of a line does count again; deleting a line takes nothing off what you wrote.
+
+**In use** is read at the head of each repository's default branch: every line of code there whose text, spacing aside, matches a line counted as written in the window, each written line matched at most once across all your repositories, so in use can never exceed written, and a file copied into a second repository is in use once. A line you wrote and later deleted is not in use; a line someone else wrote is not yours, even in your repository; a line your formatter re-indented or a sweep renamed is still yours, since the sweep hands each written line it changes to the line it leaves in its place. Matching is by text, not by history, so a line as common as a lone closing brace matches any such line you wrote. A line is **test** code when its file sits in a tests folder (`tests`, `__tests__`, `spec`, `e2e` and the like) or is named as a test (`test_x.py`, `x_test.go`, `x.test.ts`, `XTest.java`), or in Rust, when it sits in a `#[cfg(test)]` module; every other line in use is **production**. A repository whose history cannot be read line by line counts its added lines whole, comments and blank lines included, adds nothing in use, and is counted in `assets/cards.json`.
+
+What counts as yours, for both:
+
+- **Only your own commits.** Commits whose author address belongs to another GitHub account are someone else's and add nothing: no lines, no commit, no active day. Your noreply addresses and every address linked to your account are yours. An address linked to no account counts as yours in a repository where it is the only author, and elsewhere only under your name or login; list any others in the `author-emails` input. An organization's card counts every member.
+- **No automation.** Commits by bots, by a workflow (a `[bot]` committer, even when you are the author) or under names like "Automated" or "github-actions" are left out.
+- **No reformatting.** A commit that reformats ten or more files at once, each adding about as many lines as it deletes (a formatter, re-indenting, a line-ending change), adds nothing written for those files, and neither do commits listed in a repository's `.git-blame-ignore-revs`. The lines they touch stay yours in use.
+- **Once per change.** The same change landed twice under new hashes (a cherry-pick, a rebase that kept the old branch, an amend still reachable from a tag) counts once.
+- **Not what you started from.** A commit that adds more than 500 new files of counted code brings in an existing codebase: it counts as a commit and an active day but adds no lines, written or in use, and `assets/cards.json` records the lines it held. The files of another account's template your repository was made from count as already written, and so do coderprint's own files in your relay copy.
+- **Not generated or vendored.** Vendored folders, generated output, lockfiles, submodules and data files never count. Commits dated in the future (a wrong clock) are left out.
+
+A file's language comes from its name or extension. The chart names at most eight languages; the rest, and any language under 1% of the window's lines of code, are drawn as Other, so the legend lists only what can be seen. The languages count in the stats covers every language at 1% or more of your window's lines of code, named on the chart or not.
+
+Every time is moved to the start of its day before anything is drawn, so nothing on the card tells what time of day you work. A repository that cannot be read, even on a second try, is left out and counted in `assets/cards.json`; if more than one, and more than a tenth of them, cannot be read, the previous panels are kept.
 
 Days are your own, if and only if your public profile already says where you are. coderprint reads two things any visitor can see: the local time GitHub shows on your profile, if you turned that on, and your profile's location, looked up in a table of cities built from [GeoNames](https://www.geonames.org). The time zone always wins; the location can only choose among the zones with that offset today, which decides daylight saving for past days. A location that could mean places in different zones, such as "Santa Clara" (California or Cuba), "USA" or "SF / NYC", is not guessed at: days then fall at your shown offset, fixed for every past day so its daylight saving is ignored, or with no time zone shown, in UTC. Nothing else is asked for, and the zone is never printed or written anywhere.
 
@@ -110,12 +126,16 @@ The relay serves the card at `/api/card` and nothing else: the `public` folder, 
 | `apple-music-uid` | none | Shows the track you last played on Apple Music (step 3). Set this or `spotify-uid`, not both. |
 | `relay` | none | Your relay's card address, to merge the panel and the music card into one image. |
 | `mark` | none | Your own watermark, drawn faintly behind the chart: SVG path data with straight segments only, filled even-odd, up to 48 KB. Pass it from a secret (`mark: ${{ secrets.CODERPRINT_MARK }}`) so the path data never sits in your repository. It sits turned 10 degrees, as part of the panel's design. It is drawn into the panel as pixels, merged with the background, so like any picture what is drawn can still be seen and traced. |
+| `author-emails` | none | Addresses you commit from that are not linked to your GitHub account, separated by commas, so their commits count as yours. |
+| `time-limit` | `1100` | Seconds the drawing step may run. Keep it under the job's `timeout-minutes`; a repository that cannot be read in time is left out and counted. |
 | `force` | `false` | Redraw even if fewer repositories are visible than last time. Otherwise the old panel is kept, since that usually means a deleted repository or a token that lost access. |
 | `commit` | `true` | Commit and push the panel and README when they change. |
 
 ## Privacy
 
-Action logs on a public repository are public, so coderprint never prints or writes a repository name, a file path or a commit message. The panel and `assets/cards.json` hold totals only. Clones live in a temporary folder that is deleted when the run ends, including when it is stopped by the time limit.
+Action logs on a public repository are public, so coderprint never prints or writes a repository name, a file path, a commit message or an email address. The panel and `assets/cards.json` hold totals only, by whole days. Each clone is deleted as soon as it has been read, and the temporary folder when the run ends, including when it is stopped by the time limit (on GitHub's own runners; a stopped run on your own machine can leave it behind).
+
+What the card does publish: for every repository it counts, private ones included, the language mix, the lines and the days worked. Installing the App on **Only select repositories** keeps the others out entirely. Every refresh is a commit to your public profile repository, so earlier panels stay in its history.
 
 ## Credits
 
