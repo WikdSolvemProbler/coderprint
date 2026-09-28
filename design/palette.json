@@ -1,6 +1,8 @@
 {
  "green": "#53b14f",
  "red": "#ff2e2e",
+ "yellow": "#f0c93c",
+ "yellow_lite": "#9c7a00",
  "colors": {
   "Rust": "#d4835c",
   "Python": "#7cbac4",
