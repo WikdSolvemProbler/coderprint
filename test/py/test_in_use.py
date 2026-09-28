@@ -410,6 +410,14 @@ d = run(["lone"])
 check("in_use-UP-3", "a run of fewer than 3 matched lines is written, not moved: 3 + 2 + 2 written",
       lines(d) == 7, figures(d))
 
+r = new_repo("reindent")
+write(r, "a.py", body("ri", 4))
+c1 = commit(r, "write", T0)
+write(r, "a.py", "if True:\n" + body("ri", 4, "    "))
+c2 = commit(r, "wrap it in an if", T0 + DAY)
+case("in_use-UP-3", "a block only re-indented is moved, not written: 4 + 1", run(["reindent"]),
+     truth(["reindent"], {c1, c2}, ("-w",)), 5)
+
 # ---------------------------------------------------------------- IU-02: sweeps by anyone; IU-03: where credit goes
 
 
