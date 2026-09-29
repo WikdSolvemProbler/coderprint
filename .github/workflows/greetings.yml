@@ -32,7 +32,7 @@ jobs:
     # whenever its author has never opened an issue, so they would greet a
     # returning contributor's every pull request (actions/first-interaction
     # issues 402 and 410, both open).
-    - uses: actions/first-interaction@34f15e814fe48ac9312ccf29db4e74fa767cbab7 # v1.3.0
+    - uses: actions/first-interaction@1c4688942c71f71d4f5502a26ea67c331730fa4d # v3.1.0
       with:
         repo-token: ${{ secrets.GITHUB_TOKEN }}
         issue-message: |
