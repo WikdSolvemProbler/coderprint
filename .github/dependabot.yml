@@ -7,3 +7,12 @@ updates:
       day: monday
     cooldown:
       default-days: 7
+    open-pull-requests-limit: 3
+    groups:
+      routine-action-updates:
+        patterns: ['*']
+        update-types: [minor, patch]
+    # greetings.yml deliberately retains v1 because v2/v3 misidentify returning contributors.
+    ignore:
+      - dependency-name: actions/first-interaction
+        update-types: ['version-update:semver-major']
