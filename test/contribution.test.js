@@ -202,8 +202,13 @@ test('the box counts however it is written: spaces inside, numbered, or quoted',
 
 test('a section holding only comments is empty, and an unclosed comment hides the rest', () => {
   assert.deepEqual(missingNames(fill({ ...ANSWERS, Who: '<!-- still thinking -->\n<!--\nmore\n-->' })), ['Who']);
-  // The template's own comments come out first, or the unclosed one would end at the next of them.
-  const cut = FILLED.replace(/<!--[^\n]*-->\n/g, '').replace('### When', '<!-- an unclosed comment\n### When');
+  // Build answered sections without template guidance, so no later comment closes the unclosed one.
+  const cut = [
+    '### Who', ANSWERS.Who, '', '### What', ANSWERS.What, '',
+    '<!-- an unclosed comment', '### When', ANSWERS.When, '',
+    '### Where', ANSWERS.Where, '', '### Why', ANSWERS.Why, '',
+    `- [ ] ${CHECKBOX_TEXT}`,
+  ].join('\n');
   assert.deepEqual(missingNames(cut), ['When', 'Where', 'Why', 'The checkbox "This pull request questions a decision or claim in coderprint" is gone']);
 });
 
