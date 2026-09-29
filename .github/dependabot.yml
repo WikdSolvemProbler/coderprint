@@ -16,3 +16,15 @@ updates:
     ignore:
       - dependency-name: actions/first-interaction
         update-types: ['version-update:semver-major']
+  - package-ecosystem: npm
+    directory: /test/fuzz
+    schedule:
+      interval: weekly
+      day: monday
+    cooldown:
+      default-days: 7
+    open-pull-requests-limit: 3
+    groups:
+      fuzz-tool-updates:
+        patterns: ['*']
+        update-types: [minor, patch]
