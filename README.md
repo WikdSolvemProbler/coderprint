@@ -6,6 +6,8 @@
 
 # coderprint
 
+> **In development.** Code is licensed under the [PolyForm Noncommercial License 1.0.0](LICENSE.md). The [design license](design/LICENSE.md) applies separately.
+
 Your code's fingerprint on your GitHub profile: how much you actually wrote, how often, and in what, across every repository you own, private ones included. It runs as a GitHub Action inside your own profile repository, so nothing outside GitHub ever reads your code.
 
 ## What it shows
