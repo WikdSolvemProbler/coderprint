@@ -17,6 +17,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import urllib.parse
 
 CP_PATH = os.path.abspath(sys.argv[1])
 
@@ -579,6 +580,16 @@ def emulate(m, fail, repos, clock=None, cost=0):
     and failing the test on anything else that would reach GitHub."""
     real_run, asked = m.run, []
 
+    def clone_name(arg):
+        """The owner/repository in an exact GitHub HTTPS clone URL, or None for another argument."""
+        if not isinstance(arg, str):
+            return None
+        parsed = urllib.parse.urlsplit(arg)
+        if parsed.scheme != "https" or parsed.netloc != "github.com" or parsed.query or parsed.fragment:
+            return None
+        match = re.fullmatch(r"/([A-Za-z0-9-]{1,39}/[A-Za-z0-9._-]{1,100})\.git", parsed.path)
+        return match.group(1) if match else None
+
     def graphql(query):
         asked.append(query)
         if "templateRepository" in query:
@@ -624,9 +635,8 @@ def emulate(m, fail, repos, clock=None, cost=0):
             if status:
                 raise m.Failed("gh exited 1", out)
             return out
-        url = next((a for a in args if "github.com" in str(a)), None)
-        if url:
-            full = url.split("https://github.com/", 1)[1][:-len(".git")]
+        full = next((name for a in args if (name := clone_name(a)) is not None), None)
+        if full is not None:
             if full in fail:
                 raise m.Failed("git exited 128")
             if clock is not None and "--filter=blob:none" not in args:   # reading a repository takes time
@@ -637,6 +647,8 @@ def emulate(m, fail, repos, clock=None, cost=0):
             subprocess.run(["git", "clone", "-q", "--bare", SOURCES[REMOTE.get(full, full.split("/")[1])], args[-1]],
                            check=True, capture_output=True)
             return b""
+        if "clone" in args:
+            raise AssertionError("an unexpected clone endpoint")
         if "--missing=print" in args:   # a clone without file contents lists every file version as missing
             listing = subprocess.run(["git", "-C", args[2], "cat-file", "--batch-all-objects",
                                       "--batch-check=%(objecttype) %(objectname)"], capture_output=True, text=True)
