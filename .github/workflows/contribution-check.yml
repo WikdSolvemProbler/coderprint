@@ -11,7 +11,7 @@
 name: contribution check
 
 on:
-  pull_request_target:
+  pull_request_target: # zizmor: ignore[dangerous-triggers] Only the base SHA's checker is executed, with a read-only token and body passed as data.
     types: [opened, edited, reopened, synchronize]
 
 permissions:
@@ -27,6 +27,11 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
+      - name: Monitor runner activity
+        uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
+        with:
+          egress-policy: audit
+
       - name: Check out the checker from the base branch
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
