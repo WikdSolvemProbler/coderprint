@@ -7,6 +7,34 @@ coderprint has two parts, and a vulnerability can live in either:
 
 This policy says which versions get fixes, how to report a problem privately, what happens after you do, and what counts as a vulnerability here. It was written 26SEP2026.
 
+## Automated security checks
+
+The repository uses the following free checks. The workflows run on standard GitHub-hosted runners in this public repository; they do not need a paid scanner subscription or another GitHub account.
+
+| Check | Coverage | When it runs |
+| --- | --- | --- |
+| CodeQL | Python, JavaScript, and GitHub Actions security analysis | Pushes and pull requests to `main`, weekly |
+| OSSAR | Additional open source static analysis | Pushes and pull requests to `main`, weekly |
+| Semgrep Community Edition | Community security rules for the source code | Pushes and pull requests to `main`, weekly, manually |
+| zizmor and actionlint | Workflow security, syntax, and embedded shell checks | Pushes and pull requests to `main`, weekly, manually |
+| Gitleaks | Secrets throughout the checked-out Git history, with redacted output | Pushes and pull requests to `main`, weekly, manually |
+| OpenSSF Scorecard | Repository and supply-chain security practices | Pushes to `main`, weekly, manually |
+| Dependency review | Newly introduced vulnerable dependencies | Pull requests to `main` |
+| Dependabot | Updates to pinned GitHub Actions | Weekly update pull requests |
+| Harden-Runner Community | Runner activity and network monitoring | First step of each workflow job |
+
+GitHub's secret scanning, push protection, Dependabot alerts, and Dependabot security updates are also enabled. Gitleaks runs its free CLI directly so history scanning does not depend on the wrapper action's pull-request range selection. Secret values are redacted, and secret reports are not posted as comments or uploaded as public artifacts.
+
+Third-party actions are pinned to full commit hashes. Gitleaks and actionlint downloads are verified against fixed checksums, and the Semgrep container is pinned by digest. Each job has a finite deadline. Pull requests use the `pull_request` trigger for source scans, without application secrets, and checkouts do not persist credentials. The separate contribution and labeling workflows retain their trusted-base `pull_request_target` behavior described in their source.
+
+CodeQL, OSSAR, Semgrep, zizmor, and Scorecard findings appear in the repository's **Security and quality** tab. A successful scanner job means analysis completed; it does not prove there were no findings. Actionlint and Gitleaks fail their jobs when they find problems. Scorecard recommendations are advisory and can include practices that need a maintainer decision, such as branch protection or independent review. Harden-Runner uses audit mode to establish a network baseline; it does not impose a repository-specific network allowlist.
+
+Fork pull requests receive Semgrep results in their job logs and zizmor results as a failing check when findings are present; they do not need a token that can upload reports. Three inline zizmor exceptions cover the existing `pull_request_target` triggers: contribution checking executes only its trusted-base checker with read-only permissions, and greetings and labeling never check out or execute pull-request code. These exceptions cover the trigger warning alone; the other workflow-security rules remain active. Reassess them if those workflows start consuming executable content from a pull request.
+
+Dependabot opens update proposals for review; it does not merge them. The contribution-description requirements still apply to those pull requests. This project has no third-party Python or JavaScript runtime packages, so there are no package lockfiles for separate package vulnerability scanners to analyze. Add the appropriate package ecosystem to Dependabot if that changes.
+
+Configuration and free-tier details: [GitHub Actions billing](https://docs.github.com/en/billing/concepts/product-billing/github-actions), [zizmor](https://github.com/zizmorcore/zizmor-action), [actionlint](https://github.com/rhysd/actionlint), [Gitleaks](https://github.com/gitleaks/gitleaks), [Semgrep CE](https://docs.semgrep.dev/semgrep-ci/sample-ci-configs), [Scorecard](https://github.com/ossf/scorecard-action), and [Harden-Runner Community](https://github.com/step-security/harden-runner#features-and-pricing-tiers).
+
 ## Supported versions
 
 Security fixes land on the `main` branch and ship as a new release. Only the latest commit on `main` and the newest release are supported. The README tells users to pin the Action to a full commit, so a fix to the Action reaches a user only when they move their pin to the new release, and a fix to the relay reaches them only when they update their own deployed copy to it. The advisory for each fix names the release to move to.

@@ -10,7 +10,7 @@ name: Greetings
 on:
   issues:
     types: [ opened ]
-  pull_request_target:
+  pull_request_target: # zizmor: ignore[dangerous-triggers] Posts a fixed greeting through a pinned action; no checkout or PR code execution.
     types: [ opened ]
 
 permissions: {}
@@ -23,6 +23,11 @@ jobs:
       issues: write
       pull-requests: write
     steps:
+    - name: Monitor runner activity
+      uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
+      with:
+        egress-policy: audit
+
     # v1 is kept on purpose. v2 and v3 count a pull request as a first one
     # whenever its author has never opened an issue, so they would greet a
     # returning contributor's every pull request (actions/first-interaction
