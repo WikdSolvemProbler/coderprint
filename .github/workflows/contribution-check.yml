@@ -1,9 +1,9 @@
 # Checks that every pull request description answers Who, What, When, Where and Why, and How and Evidence as
 # well when the contributor ticks the box saying it questions a decision or claim in coderprint (CONTRIBUTING.md
 # sets out the rule). It runs on pull_request_target, so the workflow and the checker are always the ones on
-# the base branch: a pull request that edits either cannot change what checks it. That trigger is safe here only
+# the default branch: a pull request that edits either cannot change what checks it. That trigger is safe here only
 # because the job never checks out or runs the contributor's code: it checks out the checker alone, from the
-# base branch, with a read-only token, and the description reaches the checker through an environment
+# default branch, with a read-only token, and the description reaches the checker through an environment
 # variable, never through an expression written into the script.
 # Each action is pinned to the full commit hash of the release named in its comment: the latest release of each,
 # https://github.com/actions/checkout/releases/tag/v7.0.1 and https://github.com/actions/setup-node/releases/tag/v7.0.0,
@@ -11,7 +11,7 @@
 name: contribution check
 
 on:
-  pull_request_target: # zizmor: ignore[dangerous-triggers] Only the base SHA's checker is executed, with a read-only token and body passed as data.
+  pull_request_target: # zizmor: ignore[dangerous-triggers] Only the default branch's checker is executed, with a read-only token and body passed as data.
     types: [opened, edited, reopened, synchronize]
 
 permissions:
@@ -32,10 +32,11 @@ jobs:
         with:
           egress-policy: audit
 
-      - name: Check out the checker from the base branch
+      - name: Check out the checker from the default branch
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ github.event.pull_request.base.sha }}
+          # pull_request_target supplies the trusted default-branch ref/SHA.
+          # Keep the default checkout: never override this with a PR-controlled ref.
           persist-credentials: false
           sparse-checkout: .github/scripts/contribution-check.mjs
           sparse-checkout-cone-mode: false

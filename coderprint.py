@@ -2826,7 +2826,8 @@ def reading_of(version, reader, key):
 def blob_id(lines, eol, like):
     """The git object name of a file of these lines, in the hash of the object name like (SHA-1 or SHA-256)."""
     data = b"\n".join(lines) + (b"\n" if eol else b"")
-    h = hashlib.sha256() if len(like) == 64 else hashlib.sha1()
+    # Match Git's object format; SHA-1 here is an object identifier, not a security signature.
+    h = hashlib.sha256() if len(like) == 64 else hashlib.sha1()  # nosemgrep: python.lang.security.insecure-hash-algorithms.insecure-hash-algorithm-sha1
     h.update(b"blob %d\x00" % len(data))
     h.update(data)
     return h.hexdigest()
@@ -4128,7 +4129,8 @@ def rust_test_files(files, declared, roots):
 NO_LINES = ((), ())   # a file version whose diff added and removed no line of code
 # The empty file, in SHA-1 and SHA-256 repositories: every template and project holds one (a .gitkeep, an empty
 # __init__.py), so it tells no copy (see collect).
-EMPTY_BLOBS = {hashlib.sha1(b"blob 0\0").hexdigest(), hashlib.sha256(b"blob 0\0").hexdigest()}
+# Both Git object formats are required for compatibility; these are not security signatures.
+EMPTY_BLOBS = {hashlib.sha1(b"blob 0\0").hexdigest(), hashlib.sha256(b"blob 0\0").hexdigest()}  # nosemgrep: python.lang.security.insecure-hash-algorithms.insecure-hash-algorithm-sha1
 
 
 def move_credit(pool, added, sha, files):
