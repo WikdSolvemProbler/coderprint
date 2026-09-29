@@ -1028,13 +1028,13 @@ describe('the Apple Music card', () => {
   });
 
   it('escapes a hostile song and artist and keeps them as text', () => {
-    const song = '&lt;/text&gt;&lt;script&gt; ]]&gt; &quot;&apos;';
+    const song = '&lt;/text&gt;&lt;script&gt;&lt;SCRIPT&gt; ]]&gt; &quot;&apos;';
     const artist = '&lt;image href=&quot;x&quot;/&gt;';
     const svg = card(appleSvg({ song, artist }), PALETTE.light);
     assert.notEqual(svgInner(svg), null);
-    assert.ok(svg.includes(`>&lt;/text&gt;&lt;script&gt; ]]&gt; "'</text>`));
+    assert.ok(svg.includes(`>&lt;/text&gt;&lt;script&gt;&lt;SCRIPT&gt; ]]&gt; "'</text>`));
     assert.ok(svg.includes('>&lt;image href="x"/&gt;</text>'));
-    assert.doesNotMatch(svg, /<script|<image href="x"|\]\]>/);
+    assert.doesNotMatch(svg, /<script|<image href="x"|\]\]>/i);
   });
 
   it('cuts a long song or artist to the pane with an ellipsis', () => {
