@@ -82,6 +82,8 @@ Never paste a token, a private key, or the name of a private repository. coderpr
 
 A pull request that passes the check still needs review. The check confirms that the questions are answered, not that the answers are right.
 
+`main` is protected: changes arrive through a pull request whose required regression, fuzzing, and security checks pass on an up-to-date branch. Resolve review conversations before merging. Use a squash or rebase merge to preserve linear history. These rules also apply to the repository owner; direct pushes, force pushes, and deletion of `main` are blocked. No approval is required while there is only one maintainer. Automated checks do not constitute independent human review. The current settings and their limits are documented in [SECURITY.md](SECURITY.md#protected-main-branch).
+
 ## Setting up and running the tests
 
 The relay (`api/card.js` and `lib/compose.js`) and its tests need Node.js 22 or later and nothing else: `package.json` lists no dependencies, so there is nothing to install.
@@ -91,6 +93,8 @@ timeout -k 10s 300s npm test
 ```
 
 This runs `node --test` over `test/*.test.js`.
+
+The security fuzzing tools are separate from the application and its normal test suite. [test/fuzz/README.md](test/fuzz/README.md) describes the locked tool installation, reproducible properties, seed replay, and bounded coverage-guided campaigns. Fuzz failures block merging; keep any minimized reproducer as a regression case.
 
 The generator's synthetic regression checks need Python 3.12 or later, Git, and Node.js 22 or later. They build temporary Git histories and replace GitHub responses locally; they do not need a token or access to another account. From the repository root, run:
 

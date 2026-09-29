@@ -18,24 +18,46 @@ The repository uses the following free checks. The workflows run on standard Git
 | Semgrep Community Edition | Community security rules for the source code | Pushes and pull requests to `main`, weekly, manually |
 | zizmor and actionlint | Workflow security, syntax, and embedded shell checks | Pushes and pull requests to `main`, weekly, manually |
 | Gitleaks | Secrets throughout the checked-out Git history, with redacted output | Pushes and pull requests to `main`, weekly, manually |
+| Jazzer.js and fast-check | Coverage-guided and property-based fuzzing of hostile relay inputs | Pushes and pull requests to `main`, weekly, manually |
 | OpenSSF Scorecard | Repository and supply-chain security practices | Pushes to `main`, weekly, manually |
 | Dependency review | Newly introduced vulnerable dependencies | Pull requests to `main` |
-| Dependabot | Updates to pinned GitHub Actions | Weekly update pull requests |
+| Dependabot | Updates to pinned GitHub Actions and isolated fuzzing tools | Weekly update pull requests |
 | Harden-Runner Community | Runner activity and network monitoring | First step of each workflow job |
 
 GitHub's secret scanning, push protection, Dependabot alerts, and Dependabot security updates are also enabled. Gitleaks runs its free CLI directly so history scanning does not depend on the wrapper action's pull-request range selection. Secret values are redacted, and secret reports are not posted as comments or uploaded as public artifacts.
 
-Third-party actions are pinned to full commit hashes. Gitleaks and actionlint downloads are verified against fixed checksums, and the Semgrep container is pinned by digest. Each job has a finite deadline. Pull requests use the `pull_request` trigger for source scans, without application secrets, and checkouts do not persist credentials. The separate contribution and labeling workflows retain their trusted-base `pull_request_target` behavior described in their source.
+Third-party actions are pinned to full commit hashes, and GitHub enforces full-SHA pins for actions used by this repository. The setting is recorded in [.github/actions-permissions.json](.github/actions-permissions.json). Gitleaks and actionlint downloads are verified against fixed checksums, and the Semgrep container is pinned by digest. Each job has a finite deadline. Pull requests use the `pull_request` trigger for source scans, without application secrets, and checkouts do not persist credentials. The separate contribution and labeling workflows retain their trusted-base `pull_request_target` behavior described in their source.
 
-CodeQL, OSSAR, Semgrep, zizmor, and Scorecard findings appear in the repository's **Security and quality** tab. A successful scanner job means analysis completed; it does not prove there were no findings. Actionlint and Gitleaks fail their jobs when they find problems. Scorecard recommendations are advisory and can include practices that need a maintainer decision, such as branch protection or independent review. Harden-Runner uses audit mode to establish a network baseline; it does not impose a repository-specific network allowlist.
+CodeQL, OSSAR, Semgrep, zizmor, and Scorecard findings appear in the repository's **Security and quality** tab. A successful scanner job alone does not prove there were no findings: CodeQL and OSSAR are also covered by the merge rule below. Actionlint, Gitleaks, Semgrep, and pull-request zizmor scans fail their jobs when they find problems. Fuzzing and the npm audit of its locked dependencies must pass too. Scorecard recommendations remain visible and advisory. Harden-Runner uses audit mode to establish a network baseline; it does not impose a repository-specific network allowlist.
 
-Fork pull requests receive Semgrep results in their job logs and zizmor results as a failing check when findings are present; they do not need a token that can upload reports. Three inline zizmor exceptions cover the existing `pull_request_target` triggers: contribution checking executes only its trusted-base checker with read-only permissions, and greetings and labeling never check out or execute pull-request code. These exceptions cover the trigger warning alone; the other workflow-security rules remain active. Reassess them if those workflows start consuming executable content from a pull request.
+All pull requests receive Semgrep results in their job logs and zizmor results as a failing check when findings are present; those checks do not need a token that can upload reports. Trusted branch and scheduled scans upload their reports. Three inline zizmor exceptions cover the existing `pull_request_target` triggers: contribution checking executes only its trusted-base checker with read-only permissions, and greetings and labeling never check out or execute pull-request code. These exceptions cover the trigger warning alone; the other workflow-security rules remain active. Reassess them if those workflows start consuming executable content from a pull request.
 
 Two inline Semgrep exceptions retain SHA-1 when calculating Git object identifiers in `blob_id` and `EMPTY_BLOBS`. These values must match Git's SHA-1 repository format; they are not used as cryptographic signatures. SHA-256 repositories already use their corresponding object format.
 
-Dependabot opens update proposals for review; it does not merge them. The contribution-description requirements still apply to those pull requests. This project has no third-party Python or JavaScript runtime packages, so there are no package lockfiles for separate package vulnerability scanners to analyze. Add the appropriate package ecosystem to Dependabot if that changes.
+Dependabot opens update proposals for review; it does not merge them. The contribution-description requirements still apply to those pull requests. The application has no third-party Python or JavaScript runtime packages. Fuzzing tools are isolated under `test/fuzz`, with an npm lockfile, dependency auditing, and their own Dependabot update configuration. Add the appropriate package ecosystem if runtime dependencies are introduced.
 
 Configuration and free-tier details: [GitHub Actions billing](https://docs.github.com/en/billing/concepts/product-billing/github-actions), [zizmor](https://github.com/zizmorcore/zizmor-action), [actionlint](https://github.com/rhysd/actionlint), [Gitleaks](https://github.com/gitleaks/gitleaks), [Semgrep CE](https://docs.semgrep.dev/semgrep-ci/sample-ci-configs), [Scorecard](https://github.com/ossf/scorecard-action), and [Harden-Runner Community](https://github.com/step-security/harden-runner#features-and-pricing-tiers).
+
+## Protected main branch
+
+`main` requires a pull request, passing regression and security checks from GitHub Actions, an up-to-date branch, resolved review conversations, and linear history. Force pushes and branch deletion are disabled. These requirements also apply to administrators. The applied settings are recorded in [.github/branch-protection.json](.github/branch-protection.json); editing that file alone does not change GitHub's settings.
+
+The 12 required checks include the regression suite, fuzzing, actionlint, zizmor, Gitleaks, CodeQL for all three configured languages, OSSAR, Semgrep's pull-request scan, dependency review, and the contribution-description check. Scorecard runs on the default branch after merging because it measures repository-wide practices.
+
+An additional active ruleset requires CodeQL and the three OSSAR tools (Bandit, ESLint, and BinSkim) to supply analysis and blocks their new findings at every severity. There are no bypass actors. GitHub applies this gate to findings whose entire location is in the pull-request diff; existing alerts still need separate attention. The applied rule is recorded in [.github/code-scanning-ruleset.json](.github/code-scanning-ruleset.json). As with branch protection, editing a settings file does not apply it to GitHub. See [GitHub's code scanning merge protection](https://docs.github.com/en/code-security/concepts/code-scanning/merge-protection).
+
+This is currently a single-maintainer project. Pull requests and CI are required, but a second person's approval is not required: that would prevent the sole maintainer from merging their own work. This does not provide independent human review, and automated analysis is not represented as such. When another maintainer can review changes, increase the required approval count and enable approval of the latest push.
+
+## Scorecard limits
+
+Scorecard's complete findings remain visible, including criteria that this project cannot currently meet:
+
+- **Code review:** the check evaluates actual independent human reviews in recent history. Requiring PRs and CI now cannot create reviews of past changes, and bot or AI analysis is not a substitute for a second human reviewer.
+- **Maintained:** GitHub records this repository as created on 26 September 2026. Scorecard assigns a low score to repositories under 90 days old before evaluating sustained activity. The scheduled scan will reevaluate this over time; imported history or artificial commits do not change the repository's age.
+- **OpenSSF Best Practices badge:** the passing criteria require free/libre and open-source software (FLOSS); OSI approval is separately suggested. coderprint's noncommercial restriction does not meet the FLOSS requirement, so no qualifying badge is claimed and the product's licensing is not changed to improve a scanner score.
+- **Branch protection:** the enforced protections above work with one maintainer. Scorecard's higher scoring tiers additionally require independent approvals; a remaining score warning does not mean that `main` is unprotected.
+
+See the [Scorecard check definitions](https://github.com/ossf/scorecard/blob/main/docs/checks.md) and the [OpenSSF badge criteria](https://www.bestpractices.dev/en/criteria/0). These limitations are reported rather than disguised with fabricated identities, approvals, activity, or badges.
 
 ## Supported versions
 

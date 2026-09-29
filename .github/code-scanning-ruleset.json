@@ -1,0 +1,25 @@
+{
+  "name": "Block new code scanning findings",
+  "target": "branch",
+  "enforcement": "active",
+  "bypass_actors": [],
+  "conditions": {
+    "ref_name": {
+      "include": ["~DEFAULT_BRANCH"],
+      "exclude": []
+    }
+  },
+  "rules": [
+    {
+      "type": "code_scanning",
+      "parameters": {
+        "code_scanning_tools": [
+          { "tool": "CodeQL", "security_alerts_threshold": "all", "alerts_threshold": "all" },
+          { "tool": "Bandit", "security_alerts_threshold": "all", "alerts_threshold": "all" },
+          { "tool": "ESLint", "security_alerts_threshold": "all", "alerts_threshold": "all" },
+          { "tool": "BinSkim", "security_alerts_threshold": "all", "alerts_threshold": "all" }
+        ]
+      }
+    }
+  ]
+}
