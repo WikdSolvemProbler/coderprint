@@ -1,0 +1,12 @@
+{
+  "name": "coderprint-fuzz",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "devDependencies": {
+    "@jazzer.js/core": "4.0.0",
+    "fast-check": "4.10.2"
+  }
+}
