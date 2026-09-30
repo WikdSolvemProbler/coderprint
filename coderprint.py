@@ -1144,6 +1144,27 @@ def git_auth(owner, name):
     return clean, env
 
 
+@contextmanager
+def clone_directory(dest, env):
+    """Isolate an initial clone from the caller checkout's local Git config.
+
+    actions/checkout can include a separate write-token config from its own
+    Git directory. An initial `git clone` launched there can send that header
+    along with coderprint's read-token header. A fresh child directory and a
+    ceiling at its parent keep Git from discovering any ancestor checkout,
+    including when CLONE_CACHE itself lives inside one. Global proxy and CA
+    configuration still apply.
+    """
+    absolute = os.path.abspath(dest)
+    parent = os.path.realpath(os.path.dirname(absolute))
+    with tempfile.TemporaryDirectory(prefix=".coderprint-clone-", dir=parent) as scratch:
+        selected = dict(env)
+        selected["GIT_CEILING_DIRECTORIES"] = parent
+        for name in ("GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_INDEX_FILE"):
+            selected.pop(name, None)
+        yield os.path.realpath(scratch), selected, absolute
+
+
 def clone(owner, name, dest):
     """Bare clone of every branch and tag. Output is swallowed, because it would name the repository. A cached
     clone (CLONE_CACHE) is pointed at this repository's address before fetching, so a slot can never read another,
@@ -1165,7 +1186,8 @@ def clone(owner, name, dest):
         if points:
             run(["git", "-C", dest, "symbolic-ref", "HEAD", points.group(1)])
         return
-    run(["git"] + flags + ["clone", "--bare", "--quiet", url, dest], env=env)
+    with clone_directory(dest, env) as (cwd, selected, absolute):
+        run(["git"] + flags + ["clone", "--bare", "--quiet", url, absolute], cwd=cwd, env=selected)
 
 
 # git reads a clone the same way on every machine. A local run inherits the machine's own git settings, and some of
@@ -1447,8 +1469,10 @@ def seed_blobs(full_name, dest):
             public = account.lower() not in organization_settings()[0] and account.lower() != (PROFILE_OWNER or "").lower()
             with repository_access(account, public=public):
                 flags, env = git_auth(account, name)
-                run(["git"] + flags + ["clone", "--bare", "--quiet", "--filter=blob:none",
-                                       "https://github.com/%s.git" % full_name, dest], env=env, timeout=300)
+                with clone_directory(dest, env) as (cwd, selected, absolute):
+                    run(["git"] + flags + ["clone", "--bare", "--quiet", "--filter=blob:none",
+                                           "https://github.com/%s.git" % full_name, absolute],
+                        cwd=cwd, env=selected, timeout=300)
             return run(["git", "-C", dest, "rev-list", "--objects", "--all", "--missing=print"], timeout=300)
         finally:
             if os.path.isdir(dest):

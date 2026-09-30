@@ -217,6 +217,59 @@ class OrganizationContributions(unittest.TestCase):
                     with self.assertRaises((RuntimeError, ValueError)):
                         cp.git_auth(bad_owner, bad_name)
 
+    def test_initial_clones_do_not_inherit_checkout_or_cache_parent_credentials(self):
+        with tempfile.TemporaryDirectory() as folder:
+            caller = Path(folder) / "profile-checkout"
+            caller.mkdir()
+            git(caller, "init", "-q")
+            credentials = Path(folder) / "checkout-credentials.config"
+            credentials.write_text('[http "https://github.com/"]\n'
+                                   '\textraheader = AUTHORIZATION: basic synthetic-checkout\n',
+                                   encoding="utf-8")
+            git(caller, "config", "--local",
+                "includeIf.gitdir:%s.path" % (caller / ".git").as_posix(), str(credentials))
+            cache = caller / "cache"
+            cache.mkdir()
+            inherited = subprocess.run(
+                ["git", "config", "--includes", "--get-all", "http.https://github.com/.extraheader"],
+                cwd=cache, env=fixture_env(), capture_output=True, timeout=60, check=False)
+            self.assertEqual(inherited.returncode, 0)
+            self.assertIn(b"synthetic-checkout", inherited.stdout)
+
+            seen = []
+            def fake_run(args, **kwargs):
+                if "clone" not in args:
+                    return b"?" + b"a" * 40 + b"\n"
+                cwd, selected = kwargs["cwd"], kwargs["env"]
+                seen.append(args)
+                self.assertEqual(Path(cwd).parent.resolve(), cache.resolve())
+                self.assertEqual(selected["GIT_CEILING_DIRECTORIES"], str(cache.resolve()))
+                for name in ("GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_INDEX_FILE"):
+                    self.assertNotIn(name, selected)
+                discovered = subprocess.run(
+                    ["git", "rev-parse", "--show-toplevel"], cwd=cwd, env=selected,
+                    capture_output=True, timeout=60, check=False)
+                self.assertNotEqual(discovered.returncode, 0)
+                header = subprocess.run(
+                    ["git", "config", "--includes", "--get-all", "http.https://github.com/.extraheader"],
+                    cwd=cwd, env=selected, capture_output=True, timeout=60, check=False)
+                self.assertNotIn(b"synthetic-checkout", header.stdout)
+                proxy = subprocess.run(
+                    ["git", "config", "--get", "http.proxy"], cwd=cwd, env=selected,
+                    capture_output=True, timeout=60, check=False)
+                self.assertEqual(proxy.stdout.strip(), b"http://proxy.invalid:3128")
+                return b""
+
+            inherited_env = {"GIT_CONFIG_COUNT": "1", "GIT_CONFIG_KEY_0": "http.proxy",
+                             "GIT_CONFIG_VALUE_0": "http://proxy.invalid:3128",
+                             "GIT_DIR": str(caller / ".git")}
+            with mock.patch.dict(os.environ, inherited_env), mock.patch.object(cp, "run", side_effect=fake_run):
+                with cp.repository_access(OWNER):
+                    cp.clone(OWNER, "shared", str(cache / "primary.git"))
+                cp.PROFILE_OWNER = OWNER
+                cp.seed_blobs("example/source", str(cache / "seed.git"))
+            self.assertEqual(len(seen), 2)
+
     def test_listing_adds_org_owner_without_overwriting_personal_same_name(self):
         def fake_gql(query, **kwargs):
             if kwargs["owner"] == OWNER:
