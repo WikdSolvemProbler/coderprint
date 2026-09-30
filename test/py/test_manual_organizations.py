@@ -45,7 +45,7 @@ class Generator:
         self.fail = False
         self.day = datetime.now(timezone.utc).date().isoformat()
         self.visible = 1
-        self.secret = "super-private-org-repository"
+        self.private_repository_label = "fixture-private-org-repository"
 
     def organization_settings(self):
         return self.real.organization_settings()
@@ -133,7 +133,7 @@ class ManualOrganizations(unittest.TestCase):
         self.assertEqual(readme.count(helper.START.encode()), 1)
         self.assertEqual(readme.count(helper.END.encode()), 1)
         self.assertIn(b"assets/organizations/panel-light.svg", readme)
-        self.assertNotIn(self.generator.secret.encode(), b"\n".join(first.values()))
+        self.assertNotIn(self.generator.private_repository_label.encode(), b"\n".join(first.values()))
         self.assertFalse(self.refresh())
         self.assertEqual(self.output(), first)
         self.generator.visible = 2
@@ -237,14 +237,14 @@ class ManualOrganizations(unittest.TestCase):
         self.assertEqual((external_cache / ".coderprint-organizations-cache").read_text(encoding="utf-8").strip(), "owner1")
     def test_private_import_selector_must_be_ignored_and_stays_private(self):
         selector = self.profile / "private-imports.txt"
-        selector.write_text("testorg/" + self.generator.secret + "@" + "a" * 40 + "\n", encoding="utf-8")
+        selector.write_text("testorg/" + self.generator.private_repository_label + "@" + "a" * 40 + "\n", encoding="utf-8")
         with self.assertRaisesRegex(RuntimeError, "ignored"):
             self.refresh(authored_imports_file=selector)
         self.assertEqual(self.generator.main_calls, 0)
         (self.profile / ".gitignore").write_text("private-imports.txt\n", encoding="utf-8")
         self.assertTrue(self.refresh(authored_imports_file=selector))
         published = b"\n".join(self.output().values())
-        self.assertNotIn(self.generator.secret.encode(), published)
+        self.assertNotIn(self.generator.private_repository_label.encode(), published)
         self.assertNotIn(b"a" * 40, published)
         self.assertNotIn(b"private-imports.txt", published)
 
