@@ -46,7 +46,8 @@ def git(path, *args, author=("Owner One", OWNER_EMAIL)):
                GIT_COMMITTER_NAME=author[0], GIT_COMMITTER_EMAIL=author[1],
                GIT_AUTHOR_DATE="1700000000 +0000", GIT_COMMITTER_DATE="1700000000 +0000")
     result = subprocess.run(
-        ["git", "-C", str(path), "-c", "core.autocrlf=false", "-c", "commit.gpgsign=false", *args],
+        ["git", "-C", str(path), "-c", "core.autocrlf=false", "-c", "commit.gpgsign=false",
+         "-c", "gc.auto=0", "-c", "maintenance.auto=false", *args],
         env=env, capture_output=True, timeout=60, check=False,
     )
     if result.returncode:
@@ -463,7 +464,10 @@ class OrganizationContributions(unittest.TestCase):
             def fake_clone(account, name, dest):
                 clone_calls.append((account.lower(), name))
                 source = sources[(account.lower(), name)]
-                result = subprocess.run(["git", "clone", "-q", "--bare", str(source), dest],
+                # Use the regular transfer protocol: CI's local loose-object copy failed
+                # while cloning this large fixture repository.
+                result = subprocess.run(["git", "-c", "gc.auto=0", "-c", "maintenance.auto=false",
+                                         "clone", "-q", "--bare", "--no-local", str(source), dest],
                                         env=fixture_env(), capture_output=True, timeout=60, check=False)
                 if result.returncode:
                     raise AssertionError("local clone failed: " +
