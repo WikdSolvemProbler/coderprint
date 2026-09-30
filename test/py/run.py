@@ -25,6 +25,7 @@ SCRIPTS = (
     "test_B3_data_file.py",
     "test_collection.py",
     "test_organization_contributions.py",
+    "test_manual_organizations.py",
 )
 PER_SCRIPT_SECONDS = 300
 TEST_SETTINGS = {
