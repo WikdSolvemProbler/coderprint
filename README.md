@@ -139,7 +139,27 @@ This feature is in development on `main`; the published v1.2.1 tag predates thes
 
 Set `organizations` to the organization logins to scan. Leave `organization-only` unset to combine these contributions with your personally owned repositories, or set it to `true` to show only your contributions in those organizations. Forks remain excluded. Files and commits shared by several repositories still count once.
 
-Each organization needs a separate read-only installation token in `organization-tokens`. Create a private GitHub App owned by the organization, with only **Contents: Read-only** and **Metadata: Read-only**, and install it on **Only select repositories**. Store that App's Client ID as `CODERPRINT_ORG_APP_CLIENT_ID` and its private key as `CODERPRINT_ORG_APP_KEY` in your personal profile repository. Alternatively, a public App can have separate installations on your account and the organization; a private personal App cannot be installed on an organization. [GitHub's App visibility documentation](https://docs.github.com/en/apps/creating-github-apps/registering-a-github-app/making-a-github-app-public-or-private) explains this account boundary.
+### Manual organization updates without an App
+
+Keep the daily Action configured for your personally owned repositories. Run `tools/refresh-organizations.py` locally, using your existing `gh` sign-in, to draw a separate organization-only card. No App installation or organization credential in the daily workflow is needed. Your sign-in must already have read access to the organization repositories.
+
+From a coderprint checkout, with Python 3.12 or later, `gh` and `git` installed:
+
+```sh
+timeout -k 30 1200 python3 tools/refresh-organizations.py \
+  --profile-dir /path/to/YOUR-LOGIN \
+  --organizations YOUR-ORG --time-limit 1100
+```
+
+On Windows, use your bounded process launcher with a 1,200-second deadline and the same Python arguments. The helper also requires an explicit `--time-limit` for its collection step. An optional `--authored-imports-file` reads your exact upload declarations from a local UTF-8 file; keep that file outside tracked/public files when it contains private repository names. `--clone-cache` can reuse an isolated local collection cache.
+
+The helper writes only aggregate data and panels under `assets/organizations/`, and a separate README block labeled **Organization contributions**, **manually refreshed**, and its update date. It checks the signed-in account, leaves the personal card intact, and keeps existing organization output if the scan fails. Commit and push the generated organization files and README when you want to publish the refresh. The daily personal Action preserves them.
+
+The personal and organization cards are separate views with separate update dates. Their figures are not a deduplicated combined total: code copied between the two scopes can appear in both. Neither the local selector file nor any credential should be committed.
+
+### Automatic organization updates
+
+For organization scanning inside the daily Action, each organization needs a separate read-only token in `organization-tokens`. To use an App, create a private GitHub App owned by the organization, with only **Contents: Read-only** and **Metadata: Read-only**, and install it on **Only select repositories**. Store that App's Client ID as `CODERPRINT_ORG_APP_CLIENT_ID` and its private key as `CODERPRINT_ORG_APP_KEY` in your personal profile repository. Alternatively, a public App can have separate installations on your account and the organization; a private personal App cannot be installed on an organization. [GitHub's App visibility documentation](https://docs.github.com/en/apps/creating-github-apps/registering-a-github-app/making-a-github-app-public-or-private) explains this account boundary.
 
 Add a token step before the drawing step, replacing `YOUR-ORG`:
 
