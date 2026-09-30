@@ -137,6 +137,7 @@ import functools
 import gzip
 import hashlib
 import http.client
+import importlib.util
 import itertools
 import json
 import math
@@ -153,6 +154,7 @@ import tempfile
 import threading
 import time
 import tokenize
+import types
 import unicodedata
 import urllib.parse
 import urllib.request
@@ -907,6 +909,7 @@ def owner_login():
 ACCESS_OWNER = None   # credentials for the current repository operation; the profile identity never changes
 PROFILE_OWNER = None
 PUBLIC_ACCESS = False
+ORGANIZATION_SNAPSHOT = None  # authenticated, locally refreshed history; never queried or fetched from GitHub
 
 
 def organization_settings():
@@ -916,6 +919,11 @@ def organization_settings():
         raise RuntimeError("organizations must list at most 32 GitHub organization logins")
     if len(organizations) != len(set(organizations)):
         raise RuntimeError("organizations must list unique GitHub organization logins")
+    if ORGANIZATION_SNAPSHOT is not None:
+        frozen = [s.lower() for s in ORGANIZATION_SNAPSHOT.organizations]
+        if set(organizations) & set(frozen):
+            raise RuntimeError("a saved organization must not also be configured for live access")
+        organizations += frozen
     only = os.environ.get("CARDS_ORGANIZATION_ONLY", "false").strip().lower()
     if only not in ("true", "false") or only == "true" and not organizations:
         raise RuntimeError("organization-only must be true or false, and needs at least one configured organization")
@@ -952,9 +960,23 @@ def repo_key(owner, repo):
     return repo["name"] if account.lower() == owner.lower() else account.lower() + "/" + repo["name"]
 
 
+def snapshot_store(owner):
+    store = os.environ.get("CARDS_SNAPSHOT_STORE", "").strip()
+    if not store:
+        return ""
+    if not re.fullmatch(r"[A-Za-z0-9-]{1,39}/[A-Za-z0-9._-]{1,100}", store):
+        raise RuntimeError("snapshot-store must name a personal repository")
+    account, name = store.split("/")
+    if account.lower() != owner.lower() or name in (".", "..") or name.lower() == owner.lower():
+        raise RuntimeError("snapshot-store must name a separate personal repository")
+    return store
+
+
 def active_token():
     organizations, tokens = organization_settings()
     account = (ACCESS_OWNER or "").lower()
+    if ORGANIZATION_SNAPSHOT is not None and account in ORGANIZATION_SNAPSHOT.organizations:
+        return None
     if PUBLIC_ACCESS:
         return None
     if account in organizations:
@@ -972,6 +994,7 @@ def child_env(env=None):
     # A process reading one repository has no reason to receive the other installations' credentials.
     env.pop("CARDS_ORGANIZATION_TOKENS", None)
     env.pop("CARDS_AUTHORED_IMPORTS", None)
+    env.pop("CARDS_ORGANIZATION_SNAPSHOT_KEY", None)
     if plain:
         env.pop("GH_TOKEN", None)
         env.pop("GITHUB_TOKEN", None)
@@ -1013,6 +1036,8 @@ def authored_imports(owner):
         if not match or match[1].lower() not in allowed or match[2] in (".", ".."):
             raise RuntimeError("authored-imports must list configured owner/repository@full-commit-hash pairs")
         result.add((match[1].lower() + "/" + match[2].lower(), match[3].lower()))
+    if ORGANIZATION_SNAPSHOT is not None:
+        result |= ORGANIZATION_SNAPSHOT.uploads
     return result
 
 
@@ -1042,7 +1067,14 @@ def list_repositories(owner):
             break
         cursor = page["pageInfo"]["endCursor"]
     nodes = [r for r in nodes if r["name"].lower() != owner.lower()]
+    store = snapshot_store(owner)
+    if store:
+        account, name = store.split("/")
+        nodes = [r for r in nodes if r["name"].lower() != name.lower()]
     for organization in organizations:
+        if ORGANIZATION_SNAPSHOT is not None and organization in ORGANIZATION_SNAPSHOT.organizations:
+            nodes += [dict(r) for r in ORGANIZATION_SNAPSHOT.repositories if r["owner"].lower() == organization]
+            continue
         cursor, seen, found = None, set(), set()
         with repository_access(organization):
             while True:
@@ -1139,6 +1171,10 @@ def clone(owner, name, dest):
     and is brought to what a fresh clone would hold: its branches and tags fetched and those deleted upstream pruned,
     so a tag a force-push left behind brings in nothing, and its HEAD pointed where the repository's own points now,
     so a default branch renamed or switched since is the one read at the head."""
+    if ORGANIZATION_SNAPSHOT is not None and owner.lower() in ORGANIZATION_SNAPSHOT.organizations:
+        ORGANIZATION_SNAPSHOT.restore_repository(
+            owner, name, dest, types.SimpleNamespace(run=run, child_env=child_env, remove_tree=remove_tree))
+        return
     flags, env = git_auth(owner, name)
     url = "https://github.com/%s/%s.git" % (owner, name)
     if os.path.isdir(dest):
@@ -1420,6 +1456,13 @@ def seed_blobs(full_name, dest):
     repositories whose files it would have told apart."""
     if not re.fullmatch(r"[A-Za-z0-9-]{1,39}/[A-Za-z0-9._-]{1,100}", full_name):
         return None
+    frozen = None
+    if ORGANIZATION_SNAPSHOT is not None:
+        frozen = ORGANIZATION_SNAPSHOT.seed_blobs_by_source.get(full_name.lower())
+        if full_name.split("/")[0].lower() in ORGANIZATION_SNAPSHOT.organizations:
+            if frozen is None:
+                raise RuntimeError("the saved organization template evidence is incomplete")
+            return set(frozen)
     def read():
         try:
             account, name = full_name.split("/", 1)
@@ -1438,7 +1481,8 @@ def seed_blobs(full_name, dest):
         out = again(read)
     except RuntimeError:
         return None
-    return {line[1:].strip() for line in out.decode("ascii", "replace").splitlines() if line.startswith("?")}
+    return ({line[1:].strip() for line in out.decode("ascii", "replace").splitlines() if line.startswith("?")}
+            | set(frozen or ()))
 
 
 def templates(owner, profile_owner=None):
@@ -1447,6 +1491,8 @@ def templates(owner, profile_owner=None):
     cannot see. Asked apart from the listing, so such a template never fails the listing, and each page is asked
     twice before giving up. None when GitHub cannot be asked, or answers with an error that names no repository:
     the files of the templates it would have named would then count as written (see collect)."""
+    if ORGANIZATION_SNAPSHOT is not None and owner.lower() in ORGANIZATION_SNAPSHOT.organizations:
+        return ORGANIZATION_SNAPSHOT.templates_by_owner[owner.lower()]
     found, cursor = {}, None
     query = """
       query($owner: String!, $cursor: String) { repositoryOwner(login: $owner) {
@@ -1515,6 +1561,12 @@ def resolve_authors(owner, samples):
                 and re.fullmatch(r"[A-Za-z0-9._-]{1,100}", name) and name not in (".", "..")
                 and re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", sha)):
             groups.setdefault(account.lower(), []).append((email, (name, sha)))
+    if ORGANIZATION_SNAPSHOT is not None:
+        for account in list(groups):
+            if account in ORGANIZATION_SNAPSHOT.organizations:
+                evidence = ORGANIZATION_SNAPSHOT.authors_by_owner[account]
+                found.update({email: evidence[email] for email, _ in groups.pop(account)
+                              if email in evidence and evidence[email] != ""})
     batches = [(account, items[k:k + ALIASES]) for account, items in groups.items()
                for k in range(0, min(len(items), RESOLVE_CALLS * ALIASES), ALIASES)][:RESOLVE_CALLS]
     for account, batch in batches:
@@ -1549,8 +1601,9 @@ def author_emails():
     """The addresses CARDS_AUTHOR_EMAILS lists, however the list is written: separated by commas, semicolons, spaces
     or new lines (as a YAML block or folded list gives them), each bare or as git prints it, Name <address>. An entry
     without an @ is no address, and is left out."""
-    return {e.strip("<>\"'()[]").lower() for e in re.split(r"[\s,;]+", os.environ.get("CARDS_AUTHOR_EMAILS", ""))
-            if "@" in e}
+    listed = {e.strip("<>\"'()[]").lower() for e in re.split(r"[\s,;]+", os.environ.get("CARDS_AUTHOR_EMAILS", ""))
+              if "@" in e}
+    return listed | (ORGANIZATION_SNAPSHOT.author_emails if ORGANIZATION_SNAPSHOT is not None else set())
 
 
 def agent_name(name):
@@ -8092,12 +8145,10 @@ def profile_repository(owner):
     return owner, README
 
 
-def main():
+def draw_main(owner):
     global DEADLINE, AS_OF, QUANTITY, DATA_URL
     signal.signal(signal.SIGTERM, stop_on_term)   # unwinds through the clean-up below instead of dying
     window, pin, music, relay, mark_polys, turn, word = settings()
-    DEADLINE = time_limit()
-    owner = owner_login()
     own_card_only(owner)
     profile, readme_path = profile_repository(owner)
     if relay and profile != owner:   # the relay reads the data file and the panels from owner/owner only
@@ -8279,6 +8330,13 @@ def main():
         presentation[music[0]] = {"uid": music[1]}
     card = card_data(owner, window, now, zone, start, S, repos, private > 0, data, stats, spark, commits, stream,
                      column, presentation, profile)
+    if ORGANIZATION_SNAPSHOT is not None:
+        card["scope"]["organization_snapshot"] = {
+            "as_of": ORGANIZATION_SNAPSHOT.as_of,
+            "refresh": "manual",
+            "replayed_with_personal_history": True,
+            "cross_scope_duplicates": "removed by the same collector",
+        }
 
     os.makedirs(OUT_DIR, exist_ok=True)
     os.makedirs(os.path.dirname(readme_path), exist_ok=True)   # an organization's profile/ folder
@@ -8307,6 +8365,65 @@ def main():
            plural(math.ceil(S - 1e-9), "day"), left["imports"]["commits"], data["mismatched"],
            ", ".join("%d %s" % (n, why.replace("_", " ")) for why, n in sorted(data["left_out"].items())) or "none"))
     return 0
+
+
+def main(deadline=None):
+    """Decrypt frozen organization history before drawing one card from the union of repositories."""
+    global DEADLINE, ORGANIZATION_SNAPSHOT
+    DEADLINE = deadline if deadline is not None else time_limit()
+    owner = owner_login()
+    own_card_only(owner)
+    path = os.environ.get("CARDS_ORGANIZATION_SNAPSHOT", "").strip()
+    key = os.environ.get("CARDS_ORGANIZATION_SNAPSHOT_KEY", "").strip()
+    store = snapshot_store(owner)
+    if store and not key:
+        raise RuntimeError("the private organization snapshot store needs its key; existing panel kept")
+    if not path and key and store:
+        # This personal App reads the encrypted personal store; it never accesses an organization.
+        try:
+            meta = json.loads(run(["gh", "api", "--hostname", "github.com", "repos/" + store], env=github_env(), timeout=60))
+            if (meta.get("private") is not True or meta.get("owner", {}).get("login", "").lower() != owner.lower()):
+                raise RuntimeError()
+            body = run(["gh", "api", "--hostname", "github.com", "repos/" + store + "/contents/organization.snapshot",
+                        "-H", "Accept: application/vnd.github.raw+json"], env=github_env(), timeout=120)
+            if not 1 <= len(body) <= 48 * 1024 * 1024:
+                raise RuntimeError()
+            with tempfile.TemporaryDirectory(prefix="coderprint-encrypted-") as temporary:
+                encrypted = os.path.join(temporary, "organization.snapshot")
+                with open(encrypted, "wb") as stream:
+                    stream.write(body)
+                return draw_saved_organizations(owner, encrypted, key)
+        except (RuntimeError, ValueError, KeyError, TypeError):
+            raise RuntimeError("the private organization snapshot could not be read; existing panel kept") from None
+    if bool(path) != bool(key):
+        raise RuntimeError("organization-snapshot and its key must be supplied together")
+    if not path:
+        old = previous_meta(os.path.join(OUT_DIR, DATA_FILE)).get("scope", {})
+        if isinstance(old, dict) and old.get("organization_snapshot") and not truthy("FORCE"):
+            raise RuntimeError("this combined card needs its organization snapshot; the existing panel is kept")
+        return draw_main(owner)
+    return draw_saved_organizations(owner, path, key)
+
+
+def draw_saved_organizations(owner, path, key):
+    global ORGANIZATION_SNAPSHOT
+    # The optional module is beside the Action source, not in the profile checkout.
+    spec = importlib.util.spec_from_file_location(
+        "coderprint_organization_snapshot", os.path.join(os.path.dirname(__file__), "organization_snapshot.py"))
+    storage = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(storage)
+    old = previous_meta(os.path.join(OUT_DIR, DATA_FILE)).get("scope", {})
+    minimum = old.get("organization_snapshot", {}).get("as_of") if isinstance(old, dict) else None
+    saved = storage.load_snapshot(path, key, owner, minimum_day=minimum)
+    ORGANIZATION_SNAPSHOT = saved
+    try:
+        identity = owner_identity(owner)
+        if not identity or not identity["user"] or identity["id"] != saved.user_id:
+            raise RuntimeError("the saved organization history does not match this GitHub identity")
+        return draw_main(owner)
+    finally:
+        ORGANIZATION_SNAPSHOT = None
+        saved.close()
 
 
 if __name__ == "__main__":
