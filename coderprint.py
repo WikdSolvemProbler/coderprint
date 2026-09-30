@@ -8384,8 +8384,9 @@ def main(deadline=None):
             meta = json.loads(run(["gh", "api", "--hostname", "github.com", "repos/" + store], env=github_env(), timeout=60))
             if (meta.get("private") is not True or meta.get("owner", {}).get("login", "").lower() != owner.lower()):
                 raise RuntimeError()
+            # A +json media type makes gh reformat binary ciphertext as JSON and fail.
             body = run(["gh", "api", "--hostname", "github.com", "repos/" + store + "/contents/organization.snapshot",
-                        "-H", "Accept: application/vnd.github.raw+json"], env=github_env(), timeout=120)
+                        "-H", "Accept: application/vnd.github.raw"], env=github_env(), timeout=120)
             if not 1 <= len(body) <= 48 * 1024 * 1024:
                 raise RuntimeError()
             with tempfile.TemporaryDirectory(prefix="coderprint-encrypted-") as temporary:
