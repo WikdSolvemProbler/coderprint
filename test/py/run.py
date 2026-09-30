@@ -26,6 +26,7 @@ SCRIPTS = (
     "test_collection.py",
     "test_organization_contributions.py",
     "test_manual_organizations.py",
+    "test_organization_snapshot.py",
 )
 PER_SCRIPT_SECONDS = 300
 TEST_SETTINGS = {

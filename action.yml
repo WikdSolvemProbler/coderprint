@@ -24,6 +24,15 @@ inputs:
   authored-imports:
     description: Exact owner/repository@full-commit-hash uploads you declare as your existing authored work. Overrides the bulk-import heuristic for those commits after author and file exclusions. Optional; use a secret for private repository names.
     default: ""
+  organization-snapshot:
+    description: Path to an authenticated encrypted organization history snapshot downloaded from your private personal snapshot store. Optional; organizations are refreshed locally.
+    default: ""
+  organization-snapshot-key:
+    description: Base64 snapshot decryption key from a secret. Never put the key in workflow text.
+    default: ""
+  snapshot-store:
+    description: Personal owner/repository holding encrypted snapshots; excluded from contributions. Use a secret for its private name.
+    default: ""
   window:
     description: The span the panel covers, one of all, 10y, 5y, 3y, 2y, 12m.
     default: all
@@ -67,6 +76,9 @@ runs:
         CARDS_ORGANIZATION_ONLY: ${{ inputs.organization-only }}
         CARDS_ORGANIZATION_TOKENS: ${{ inputs.organization-tokens }}
         CARDS_AUTHORED_IMPORTS: ${{ inputs.authored-imports }}
+        CARDS_ORGANIZATION_SNAPSHOT: ${{ inputs.organization-snapshot }}
+        CARDS_ORGANIZATION_SNAPSHOT_KEY: ${{ inputs.organization-snapshot-key }}
+        CARDS_SNAPSHOT_STORE: ${{ inputs.snapshot-store }}
         CARDS_WINDOW: ${{ inputs.window }}
         CARDS_THEME: ${{ inputs.theme }}
         CARDS_SPOTIFY_UID: ${{ inputs.spotify-uid }}
@@ -81,6 +93,16 @@ runs:
         case "$CARDS_TIME_LIMIT" in
           ''|*[!0-9]*) echo "::error::time-limit must be a whole number of seconds"; exit 1 ;;
         esac
+        if [ -n "$CARDS_ORGANIZATION_SNAPSHOT" ] || [ -n "$CARDS_SNAPSHOT_STORE" ]; then
+          deps=$(mktemp -d "$RUNNER_TEMP/coderprint-crypto.XXXXXX")
+          trap 'rm -rf -- "$deps"' EXIT
+          timeout -k 10 120 env -u GH_TOKEN -u GITHUB_TOKEN -u GH_ENTERPRISE_TOKEN -u GITHUB_ENTERPRISE_TOKEN \
+            -u CARDS_ORGANIZATION_TOKENS -u CARDS_ORGANIZATION_SNAPSHOT_KEY -u CARDS_SNAPSHOT_STORE \
+            -u CARDS_ORGANIZATION_SNAPSHOT -u CARDS_AUTHORED_IMPORTS -u CARDS_AUTHOR_EMAILS \
+            python3 -m pip install --disable-pip-version-check --only-binary=:all: --require-hashes \
+            --target "$deps" -r "$GITHUB_ACTION_PATH/requirements-snapshot.txt"
+          export PYTHONPATH="$deps${PYTHONPATH:+:$PYTHONPATH}"
+        fi
         if [ "$COMMIT" = true ]; then
           branch=$(git symbolic-ref -q --short HEAD) || { echo "::error::coderprint must run on a branch, not a tag"; exit 1; }
           # draw on the newest commit, so anything pushed since the run was queued is drawn around
