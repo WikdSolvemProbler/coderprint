@@ -8,7 +8,7 @@
 
 > **In development.** Code is licensed under the [PolyForm Noncommercial License 1.0.0](LICENSE.md). The [design license](design/LICENSE.md) applies separately.
 
-Your code's fingerprint on your GitHub profile: how much you actually wrote, how often, and in what, across every repository you own, private ones included. It runs as a GitHub Action inside your own profile repository, so nothing outside GitHub ever reads your code.
+Your code's fingerprint on your GitHub profile: how much you actually wrote, how often, and in what, across your own repositories and optionally your contributions in organizations, private ones included. It runs as a GitHub Action inside your own profile repository, so nothing outside GitHub ever reads your code.
 
 ## What it shows
 
@@ -34,6 +34,8 @@ These counts have limits. A rebased copy of a branch that is still kept can coun
 **In use** is read at the head of each repository's default branch: the lines of code standing there that you wrote in the window, where wrote means exactly the lines counted as written. Each written line counts in use at most once across all your repositories, so in use can never exceed written, and a file copied into a second repository, or a fork, is in use once. Every line is traced through its history: each file version is the version before it with its diff applied, so a line keeps the commit that added it, and it is yours when that commit's line was counted as written in the window. A line you wrote and later deleted is not in use; a line someone else wrote is not yours, even in your repository and however common its text, and neither is a line you wrote before the window; a line your formatter re-indented, a sweep renamed or a commit moved is still yours, whoever made the sweep or the move, since each hands the line it changes on to the line it leaves in its place, and so is a line a merge brought in from your branch. A line whose history cannot say, such as one only a merge's conflict resolution wrote, is matched by its text instead, spacing aside, against the written lines no traced line took; `assets/coderprint.json` says how many lines were traced and how many were matched by text. An archived repository's head is not in use, though its history still counts as written. A line is **test** code when its file sits in a tests folder (`tests`, `__tests__`, `spec`, `e2e` and the like) or is named as a test (`test_x.py`, `x_test.go`, `x.test.ts`, `XTest.java`), or in Rust, when it sits in a `#[cfg(test)]` module; every other line in use is **production**. A repository whose history cannot be read line by line counts its added lines whole, comments and blank lines included, adds nothing in use, is counted in `assets/coderprint.json`, and is warned of in the run's log; one whose default branch cannot be read at its head still counts the lines of code it wrote, adds nothing in use, and is counted there separately. An empty repository, or one holding only tags, has nothing in it to count.
 
 What counts as yours, for both:
+
+Organization repositories are included only when you configure `organizations`. In those repositories, a personal card counts only your GitHub-linked addresses, your account's noreply addresses, or addresses explicitly listed in `author-emails` that GitHub does not link to someone else. Matching your name or being the repository's only author is insufficient. Your profile identity stays personal; this differs from an organization's own card, which counts every member.
 
 - **Only your own commits.** Commits whose author address belongs to another GitHub account are someone else's and add nothing: no lines, no commit, no active day. Your noreply addresses, under any login you have had, and every address linked to your account are yours; another account's noreply address never is. An address linked to no account counts as yours under your name or login, and in a repository where it is the only address with commits, bots aside, unless the name on it ends in the word "bot" or "agent", as a self-hosted bot's or a coding agent's own identity does ("Renovate Bot", "Cursor Agent"): that is automation. Your own linked addresses are other addresses here: a repository you created on github.com with a README already holds a commit from one, so an unlinked address committing there counts only under your name or login. A name a machine or a tutorial gives a commit, such as "root" or "Your Name", is nobody's, so it never makes another address yours. GitHub is asked about at most 1,000 addresses a run, those likeliest to matter first; one it was not asked about counts only under your name or login. A commit two of your repositories hold is yours if it is yours in either. Addresses are read as they were committed, not as a `.mailmap` rewrites them, since GitHub reads them so. List any other address you commit from in the `author-emails` input; one GitHub links to another account is ignored. A coding agent that commits under your own name and address is you. An organization's card counts every member; an organization installs coderprint in its `.github` repository, where the panel goes into `profile/README.md`, the organization's profile, and the relay does not serve organizations yet.
 - **No automation.** Commits by bots, by a workflow (a `[bot]` committer, even when you are the author) or under names like "Automated" or "github-actions" are left out.
@@ -131,12 +133,50 @@ Unless a music card sits beside the panel, the markers hold two pictures, one fo
 
 The relay serves the card at `/api/card` and nothing else: the `public` folder, which holds only a `robots.txt`, is all a visitor can reach, so the rest of your copy stays private.
 
+## Your contributions in organizations
+
+This feature is in development on `main`; the published v1.2.1 tag predates these inputs. Pin the Action to a reviewed commit containing organization support before using them.
+
+Set `organizations` to the organization logins to scan. Leave `organization-only` unset to combine these contributions with your personally owned repositories, or set it to `true` to show only your contributions in those organizations. Forks remain excluded. Files and commits shared by several repositories still count once.
+
+Each organization needs a separate read-only installation token in `organization-tokens`. Create a private GitHub App owned by the organization, with only **Contents: Read-only** and **Metadata: Read-only**, and install it on **Only select repositories**. Store that App's Client ID as `CODERPRINT_ORG_APP_CLIENT_ID` and its private key as `CODERPRINT_ORG_APP_KEY` in your personal profile repository. Alternatively, a public App can have separate installations on your account and the organization; a private personal App cannot be installed on an organization. [GitHub's App visibility documentation](https://docs.github.com/en/apps/creating-github-apps/registering-a-github-app/making-a-github-app-public-or-private) explains this account boundary.
+
+Add a token step before the drawing step, replacing `YOUR-ORG`:
+
+```yaml
+- uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+  id: org-token
+  with:
+    client-id: ${{ vars.CODERPRINT_ORG_APP_CLIENT_ID }}
+    private-key: ${{ secrets.CODERPRINT_ORG_APP_KEY }}
+    owner: YOUR-ORG
+    permission-contents: read
+    permission-metadata: read
+```
+
+Keep the existing personal token step and add these inputs to the drawing step's `with` block:
+
+```yaml
+organizations: YOUR-ORG
+organization-tokens: ${{ format('{{"YOUR-ORG":"{0}"}}', steps.org-token.outputs.token) }}
+organization-only: true # omit to include personally owned repositories too
+authored-imports: ${{ secrets.CODERPRINT_AUTHORED_IMPORTS }} # optional
+```
+
+Use token outputs or secrets for the JSON map; never put credentials in workflow text. Each GitHub request and clone uses the corresponding installation token. A missing organization token or an unreadable organization repository stops the refresh and preserves the existing panels. Locally, without token environment variables, your existing `gh` sign-in can read organizations it already has access to.
+
+If you upload your own existing project in one large commit, the 500-file import heuristic would normally exclude its lines. Set `authored-imports` to exact `owner/repository@full-commit-hash` pairs, separated by commas or spaces, for uploads you declare to be your own work. Use a secret for private repository names. This exception applies only to the bulk-import heuristic: commits attributed to others, automation, generated or vendored files, template content and duplicate file versions remain excluded. The data file reports how many declared upload commits were credited and their counted lines, without repository names or hashes. This is an owner declaration, not independently verified proof of authorship before the upload.
+
 ## Options
 
 | Input | Default | What it does |
 | --- | --- | --- |
 | `token` | required | Reads your repositories. Use the App token from step 1. |
 | `owner` | Your repository's owner | The account whose card is drawn. It must own the repository running this Action; for an organization, run it from that organization's `.github` repository. |
+| `organizations` | none | Organization logins to scan for your own commits, separated by commas or spaces. |
+| `organization-only` | `false` | Count only your contributions in the configured organizations. Requires `organizations`. |
+| `organization-tokens` | none | JSON mapping each configured organization login to its read-only installation token. Pass token outputs or a secret. |
+| `authored-imports` | none | Exact `owner/repository@full-commit-hash` uploads declared as your existing work. Overrides the bulk-import heuristic after attribution and file exclusions; use a secret for private names. |
 | `window` | `all` | The span everything covers: `all`, `10y`, `5y`, `3y`, `2y` or `12m`. The chart starts at your oldest real work inside it, so it never shows empty time. |
 | `theme` | none | Pins one theme: `paper`, `sepia`, `sage`, `oxblood` or `ink`. Visitors in light mode still get its light version and those in dark mode its dark one. Left out, the five take turns, one a day. |
 | `spotify-uid` | none | Shows what you're playing on Spotify. Set this or `apple-music-uid`, not both. |
@@ -152,7 +192,7 @@ The relay serves the card at `/api/card` and nothing else: the `public` folder, 
 
 Action logs on a public repository are public, so coderprint never prints or writes a repository name, a file path, a commit message or an email address. The panel and `assets/coderprint.json` hold totals only, by whole days. Each clone is deleted as soon as it has been read, and the temporary folder when the run ends, including when it is stopped by the time limit (on GitHub's own runners; a stopped run on your own machine can leave it behind).
 
-What the card does publish: for every repository it counts, private ones included, the language mix, the lines and the days worked. `assets/coderprint.json` and the run's log also give how many repositories it counted, so anyone who counts your public ones can tell how many are private, and how many commits by others and by automation it left out. Installing the App on **Only select repositories** keeps the others out entirely. Every refresh is a commit to your public profile repository, so earlier panels stay in its history.
+What the card does publish: for every repository it counts, private ones included, the language mix, the lines and the days worked. `assets/coderprint.json` and the run's log also give how many repositories it counted, so anyone who counts your public ones can tell how many are private, and how many commits by others and by automation it left out. With organization support enabled, the data file also discloses the number of organization repositories and the totals credited through declared uploads, without identifying repositories or commits. Installing the App on **Only select repositories** keeps the others out entirely. Every refresh is a commit to your public profile repository, so earlier panels stay in its history.
 
 ## Credits
 
