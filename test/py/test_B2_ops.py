@@ -720,17 +720,17 @@ def _():
         os.environ.update({"GH_TOKEN": "fake-token-for-a-test", "GIT_CONFIG_COUNT": "2",
                            "GIT_CONFIG_KEY_0": "http.sslCAInfo", "GIT_CONFIG_VALUE_0": "/etc/ssl/runner-ca.pem",
                            "GIT_CONFIG_KEY_1": "http.proxy", "GIT_CONFIG_VALUE_1": "http://proxy.invalid:3128"})
-        flags, env = cp.git_auth()
+        flags, env = cp.git_auth("owner1", "example")
         listed = subprocess.run(["git", "config", "--list", "--show-scope"], env=env, cwd=ROOT, capture_output=True,
                                 text=True).stdout
         keys = sorted({line.split("\t", 1)[1].split("=", 1)[0] for line in listed.splitlines()
                        if line.startswith("command\t")})
         check("f08 git sees the runner's own settings and coderprint's header",
-              keys == ["http.https://github.com/.extraheader", "http.proxy", "http.sslcainfo"], keys)
+              keys == ["http.https://github.com/owner1/example.git.extraheader", "http.proxy", "http.sslcainfo"], keys)
         os.environ["GIT_CONFIG_COUNT"] = "junk"
-        flags, env = cp.git_auth()
+        flags, env = cp.git_auth("owner1", "example")
         check("f08 a count git would refuse is replaced", env["GIT_CONFIG_COUNT"] == "1"
-              and env["GIT_CONFIG_KEY_0"] == "http.https://github.com/.extraheader", env["GIT_CONFIG_COUNT"])
+              and env["GIT_CONFIG_KEY_0"] == "http.https://github.com/owner1/example.git.extraheader", env["GIT_CONFIG_COUNT"])
     finally:
         os.environ.clear()
         os.environ.update(old)
