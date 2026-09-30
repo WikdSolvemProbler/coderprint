@@ -143,6 +143,8 @@ Set `organizations` to the organization logins to scan. Leave `organization-only
 
 Keep the daily Action configured for your personally owned repositories. Run `tools/refresh-organizations.py` locally, using your existing `gh` sign-in, to draw a separate organization-only card. No App installation or organization credential in the daily workflow is needed. Your sign-in must already have read access to the organization repositories.
 
+An existing personal card can use either the current `assets/coderprint.json` or the recognized earlier `assets/cards.json` format. The manual organization refresh does not require redrawing or replacing the personal card first.
+
 From a coderprint checkout, with Python 3.12 or later, `gh` and `git` installed:
 
 ```sh
