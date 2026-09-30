@@ -469,15 +469,36 @@ def _():
     blob = git(src, "hash-object", "relay.js", when=day(4)).strip()
     commit(src, "copy of coderprint", day(4))
 
+    clone_errors, read_errors = [], []
+
     def fake_clone(owner, name, dest):
         if os.path.isdir(dest):
             shutil.rmtree(dest)
-        result = subprocess.run(["git", "clone", "-q", "--bare", src, dest], capture_output=True, timeout=120)
+        # Production reads through Git's transfer protocol. Exercise that same
+        # object transfer here, rather than the local hardlink/copy optimization.
+        try:
+            result = subprocess.run(["git", "-c", "gc.auto=0", "-c", "maintenance.auto=false",
+                                     "clone", "-q", "--bare", "--no-local", src, dest],
+                                    capture_output=True, timeout=120)
+        except subprocess.TimeoutExpired:
+            clone_errors.append("fixture transfer exceeded 120 seconds")
+            raise RuntimeError(clone_errors[-1]) from None
         if result.returncode:
-            raise RuntimeError("git clone fixture failed (%s): %s" %
-                               (name, result.stderr.decode("utf-8", "replace")[:240]))
+            clone_errors.append("fixture transfer exited %d: %s" %
+                                (result.returncode, result.stderr.decode("utf-8", "replace")[:240]))
+            raise RuntimeError(clone_errors[-1])
+
+    original_read_repository = cp.read_repository
+
+    def diagnosed_read_repository(*args, **kwargs):
+        try:
+            return original_read_repository(*args, **kwargs)
+        except RuntimeError as error:
+            read_errors.append("%s: %s" % (type(error).__name__, str(error)[:240]))
+            raise
 
     cp.clone = fake_clone
+    cp.read_repository = diagnosed_read_repository
     cp.resolve_authors = lambda owner, samples: {e: ("someoneelse" if "stranger" in e else None) for e in samples}
     cp.owner_identity = lambda owner: {"user": True, "id": 123, "name": "Owner One"}
     cp.templates = lambda owner: {}
@@ -490,6 +511,8 @@ def _():
     finally:
         os.environ.clear()
         os.environ.update(old)
+    check("blind-19 the synthetic history is readable", data["unread"] == 0,
+          {"unread": data["unread"], "clone_errors": clone_errors, "read_errors": read_errors})
     whys = sorted(w for _, w in data.get("left_out_times", []))
     check("blind-19 collect gives each left-out commit's time and why", whys == ["automation", "automation",
                                                                                 "copied", "others"], whys)
