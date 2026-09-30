@@ -34,6 +34,20 @@ def metadata(only=False, day=None, visible=1):
                       "repositories": {"visible": visible}}}
 
 
+def legacy_metadata():
+    return {"generated": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%MZ"),
+            "window": "all", "span_days": 1, "repositories": 1, "commits": 2,
+            "new_lines": 10,
+            "lines_of_code": {"written": 10, "in_use": 8, "production": 6, "tests": 2,
+                              "repositories_counted_without_diffs": 0},
+            "imports_skipped": 0, "lines_skipped_as_import": 0,
+            "commits_left_out": {"others": 0, "automation": 0, "landed_twice": 0},
+            "repositories_unread": 0, "unparsed_commits": 0, "future_dated_left_out": 0,
+            "theme": "paper", "themes": {"light": "paper", "dark": "ink"},
+            "palette": {mode: {key: "#123456" for key in ("bg", "text", "muted", "line")}
+                        for mode in ("light", "dark")}}
+
+
 class Generator:
     def __init__(self, source):
         self.real = helper.load_generator()
@@ -41,6 +55,7 @@ class Generator:
         self.README_END = self.real.README_END
         self.README_TWO = self.real.README_TWO
         self.LINK = self.real.LINK
+        self.WINDOWS = self.real.WINDOWS
         self.main_calls = 0
         self.fail = False
         self.day = datetime.now(timezone.utc).date().isoformat()
@@ -52,6 +67,9 @@ class Generator:
 
     def authored_imports(self, owner):
         return self.real.authored_imports(owner)
+
+    def own_legacy(self, card):
+        return self.real.own_legacy(card)
 
     def marker_lines(self, text):
         old_start, old_end = self.real.README_START, self.real.README_END
@@ -235,6 +253,57 @@ class ManualOrganizations(unittest.TestCase):
         (external / ".gitignore").write_text("cache/\n", encoding="utf-8")
         self.assertTrue(self.refresh(clone_cache=external_cache))
         self.assertEqual((external_cache / ".coderprint-organizations-cache").read_text(encoding="utf-8").strip(), "owner1")
+
+    def test_legacy_personal_metadata_allows_manual_org_card_without_conversion(self):
+        (self.profile / "assets" / "coderprint.json").unlink()
+        old = (self.profile / "assets" / "cards.json")
+        old.write_text(json.dumps(legacy_metadata()), encoding="utf-8")
+        original = old.read_bytes()
+        self.assertTrue(self.refresh())
+        self.assertEqual(old.read_bytes(), original)
+        self.assertFalse((self.profile / "assets" / "coderprint.json").exists())
+        self.assertTrue((self.profile / "assets" / "organizations" / "coderprint.json").is_file())
+        self.assertTrue((self.profile / "README.md").read_bytes().startswith(self.personal))
+
+    def test_unknown_legacy_rejected_before_scan(self):
+        (self.profile / "assets" / "coderprint.json").unlink()
+        old = (self.profile / "assets" / "cards.json")
+        for altered in ({"palette": {}, "repositories": 1},
+                        dict(legacy_metadata(), scope={"organization_only": False}),
+                        dict(legacy_metadata(), organization_repositories=1),
+                        dict(legacy_metadata(), new_lines=True)):
+            old.write_text(json.dumps(altered), encoding="utf-8")
+            with self.assertRaisesRegex(RuntimeError, "recognized personal"):
+                self.refresh()
+            self.assertEqual(self.generator.main_calls, 0)
+            self.assertFalse((self.profile / "assets" / "organizations").exists())
+
+    def test_malformed_modern_never_falls_back_to_legacy(self):
+        (self.profile / "assets" / "cards.json").write_text(json.dumps(legacy_metadata()), encoding="utf-8")
+        modern = self.profile / "assets" / "coderprint.json"
+        for invalid in ("{", json.dumps(metadata(True))):
+            modern.write_text(invalid, encoding="utf-8")
+            with self.assertRaises(RuntimeError):
+                self.refresh()
+            self.assertEqual(self.generator.main_calls, 0)
+            self.assertFalse((self.profile / "assets" / "organizations").exists())
+
+    def test_missing_or_linked_legacy_metadata_rejected(self):
+        (self.profile / "assets" / "coderprint.json").unlink()
+        with self.assertRaisesRegex(RuntimeError, "recognized personal"):
+            self.refresh()
+        self.assertEqual(self.generator.main_calls, 0)
+        outside = Path(self.tmp.name) / "outside-cards.json"
+        outside.write_text(json.dumps(legacy_metadata()), encoding="utf-8")
+        legacy = self.profile / "assets" / "cards.json"
+        try:
+            legacy.symlink_to(outside)
+        except OSError:
+            self.skipTest("symlinks unavailable on this host")
+        with self.assertRaisesRegex(RuntimeError, "link"):
+            self.refresh()
+        self.assertEqual(self.generator.main_calls, 0)
+
     def test_private_import_selector_must_be_ignored_and_stays_private(self):
         selector = self.profile / "private-imports.txt"
         selector.write_text("testorg/" + self.generator.private_repository_label + "@" + "a" * 40 + "\n", encoding="utf-8")

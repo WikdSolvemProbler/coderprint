@@ -77,7 +77,7 @@ def safe_target(root):
     """Read-only preflight; final publication is checked again by write_all."""
     assets = root / "assets"
     org = assets / "organizations"
-    for path in (root / "README.md", assets, org, root / "assets" / "coderprint.json",
+    for path in (root / "README.md", assets, org, assets / "coderprint.json", assets / "cards.json",
                  *(org / name for name in FILES)):
         if path.is_symlink() or not inside(root, path):
             raise RuntimeError("the profile output contains a link or leads outside profile-dir")
@@ -146,7 +146,59 @@ def validate_snapshot(card, owner, *, organization):
     return None
 
 
-def validate_profile(root, owner):
+def valid_legacy_snapshot(card, generator):
+    """Recognize only the personal aggregate shape written by the v1.2.0 generator."""
+    required = {"generated", "window", "span_days", "repositories", "commits", "new_lines",
+                "lines_of_code", "imports_skipped", "lines_skipped_as_import", "commits_left_out",
+                "repositories_unread", "unparsed_commits", "future_dated_left_out", "theme", "themes",
+                "palette"}
+    optional = {"spotify", "apple_music"}
+    if not isinstance(card, dict) or not required <= card.keys() or card.keys() - required - optional:
+        return False
+    if not generator.own_legacy(card) or card["repositories"] < 0:
+        return False
+
+    def quantity(value):
+        return isinstance(value, int) and not isinstance(value, bool) and value >= 0
+
+    numbers = ("span_days", "repositories", "commits", "new_lines", "imports_skipped",
+               "lines_skipped_as_import", "repositories_unread", "unparsed_commits",
+               "future_dated_left_out")
+    if any(not quantity(card[key]) for key in numbers) or card["repositories_unread"] > card["repositories"]:
+        return False
+    if not isinstance(card["window"], str) or card["window"] not in generator.WINDOWS:
+        return False
+    if not isinstance(card["generated"], str) or not re.fullmatch(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}Z", card["generated"]):
+        return False
+    try:
+        datetime.strptime(card["generated"], "%Y-%m-%dT%H:%MZ")
+    except ValueError:
+        return False
+    loc = card["lines_of_code"]
+    loc_keys = {"written", "in_use", "production", "tests", "repositories_counted_without_diffs"}
+    if (not isinstance(loc, dict) or set(loc) != loc_keys or any(not quantity(v) for v in loc.values())
+            or loc["written"] != card["new_lines"] or loc["in_use"] != loc["production"] + loc["tests"]
+            or loc["repositories_counted_without_diffs"] > card["repositories"]):
+        return False
+    left = card["commits_left_out"]
+    if (not isinstance(left, dict) or set(left) != {"others", "automation", "landed_twice"}
+            or any(not quantity(v) for v in left.values())):
+        return False
+    if (not isinstance(card["theme"], str) or not card["theme"]
+            or not isinstance(card["themes"], dict) or set(card["themes"]) != {"light", "dark"}
+            or any(not isinstance(v, str) or not v for v in card["themes"].values())):
+        return False
+    palette = card["palette"]
+    if (not isinstance(palette, dict) or set(palette) != {"light", "dark"}
+            or any(not isinstance(colors, dict) or set(colors) != {"bg", "text", "muted", "line"}
+                   or any(not isinstance(value, str) or not re.fullmatch(r"#[0-9A-Fa-f]{6}", value)
+                          for value in colors.values()) for colors in palette.values())):
+        return False
+    return all(isinstance(card[key], dict) and set(card[key]) == {"uid"}
+               and isinstance(card[key]["uid"], str) for key in optional & card.keys())
+
+
+def validate_profile(root, owner, generator):
     top = command(["git", "rev-parse", "--show-toplevel"], cwd=root, timeout=30)
     if os.path.normcase(os.path.realpath(top)) != os.path.normcase(os.path.realpath(root)):
         raise RuntimeError("profile-dir must be the root of the selected profile repository")
@@ -154,7 +206,13 @@ def validate_profile(root, owner):
     identity = remote_identity(remote)
     if not identity or any(name.lower() != owner.lower() for name in identity):
         raise RuntimeError("profile-dir is not the selected owner's owner/owner GitHub repository")
-    validate_snapshot(read_json(root / "assets" / "coderprint.json"), owner, organization=False)
+    modern = root / "assets" / "coderprint.json"
+    if modern.exists():
+        validate_snapshot(read_json(modern), owner, organization=False)
+        return
+    legacy = root / "assets" / "cards.json"
+    if not legacy.exists() or not valid_legacy_snapshot(read_json(legacy), generator):
+        raise RuntimeError("recognized personal coderprint metadata is missing or malformed")
 
 
 def selector_text(path, profile, owner, generator):
@@ -288,7 +346,7 @@ def refresh(argv=None, *, generator=None, viewer=None):
     with isolated_settings(owner, args.organizations, args.time_limit):
         organizations, _ = generator.organization_settings()
         safe_target(profile)
-        validate_profile(profile, owner)
+        validate_profile(profile, owner, generator)
         # Parse the target organization markers before doing any scan.
         merge_readme(generator, profile, "preflight")
         selector_text(args.authored_imports_file, profile, owner, generator)
