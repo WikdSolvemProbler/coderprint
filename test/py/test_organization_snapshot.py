@@ -466,6 +466,10 @@ class OrganizationSnapshot(unittest.TestCase):
         output, original = self.first_setup_card(cp)
         self.write()
         ciphertext = self.path.read_bytes()
+        # The artifact is binary, so gh must return raw bytes without its JSON
+        # response transform (raw+json fails on actual encrypted downloads).
+        with self.assertRaises((UnicodeError, json.JSONDecodeError)):
+            json.loads(ciphertext)
         commands, decrypted_directories = [], []
 
         def run(args, **kwargs):
@@ -476,7 +480,7 @@ class OrganizationSnapshot(unittest.TestCase):
             if args[4] == "repos/owner1/history-store":
                 return b'{"private":true,"owner":{"login":"OWNER1"}}'
             self.assertEqual(args[4], "repos/owner1/history-store/contents/organization.snapshot")
-            self.assertEqual(args[5:], ["-H", "Accept: application/vnd.github.raw+json"])
+            self.assertEqual(args[5:], ["-H", "Accept: application/vnd.github.raw"])
             return ciphertext
 
         def draw(owner):

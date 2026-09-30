@@ -28,3 +28,13 @@ updates:
       fuzz-tool-updates:
         patterns: ['*']
         update-types: [minor, patch]
+  - package-ecosystem: pip
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 3
+    groups:
+      snapshot-crypto-updates:
+        patterns: [cryptography, cffi, pycparser]
+        update-types: [minor, patch]
