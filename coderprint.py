@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """coderprint: lines of code written and still in use, commit activity and the language mix over time, built
-from every repository an account owns, public and private, and drawn for its GitHub profile README.
+from every repository an account owns and optionally its work in selected organizations, public and private,
+and drawn for its GitHub profile README.
 
 Copyright 2026 Peter Shiller. Licensed under the PolyForm Noncommercial License 1.0.0 (LICENSE.md), with the
 additional permissions and the reservations in NOTICE.md; the design in design/ is licensed apart.
@@ -33,7 +34,9 @@ imports all reuse content that already exists, so they add nothing. Only the own
 commits count (see authorship); others', automation's, and a second landing of one change add nothing. A
 commit that adds more than IMPORT_FILES brand-new files of code, or a run of commits that adds them in parts
 (see import_runs), is treated as bringing in an existing codebase, not writing one: it is a commit, but adds no
-lines. A path is read exactly, whatever it holds, and the settings of the machine's git that would change what a
+lines, unless the owner declares that exact upload as their existing authored work (authored_imports).
+That declaration never bypasses attribution, generated-file or copy exclusions. A path is read exactly,
+whatever it holds, and the settings of the machine's git that would change what a
 history reads as are pinned (see READ_CONFIG), so a local run reads what the Action reads. File versions from
 another account's template, or from coderprint itself in a relay copy, count as already written. Vendored
 folders, generated output (by folder, by name, or by a generator's mark in a file's first lines), lockfiles,
@@ -156,6 +159,7 @@ import urllib.request
 import zlib
 from array import array
 from collections import Counter, deque, namedtuple
+from contextlib import contextmanager
 from fractions import Fraction
 
 try:
@@ -694,7 +698,7 @@ def run(args, cwd=None, env=None, timeout=TIMEOUT, reserve=None):
     if cut:
         timeout = left
     try:
-        p = spawn(args, cwd=cwd, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        p = spawn(args, cwd=cwd, env=child_env(env), stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     except OSError:
         raise RuntimeError("%s could not be started" % what) from None
     try:
@@ -864,9 +868,9 @@ def gql(query, timeout=TIMEOUT, errors=None, reserve=None, **variables):
     args = graphql_args(query, variables)
     more = {} if reserve is None else {"reserve": reserve}
     if errors is None:
-        return graphql_answer(run(args, timeout=timeout, **more))["data"]
+        return graphql_answer(run(args, env=github_env(), timeout=timeout, **more))["data"]
     try:
-        out = run(args, timeout=timeout, **more)
+        out = run(args, env=github_env(), timeout=timeout, **more)
     except Failed as e:
         out = e.output
     answer = graphql_answer(out)
@@ -900,12 +904,127 @@ def owner_login():
     return os.environ.get("CARDS_OWNER") or gql("query { viewer { login } }")["viewer"]["login"]
 
 
+ACCESS_OWNER = None   # credentials for the current repository operation; the profile identity never changes
+PROFILE_OWNER = None
+PUBLIC_ACCESS = False
+
+
+def organization_settings():
+    """Explicit organization scope and optional per-installation tokens; invalid settings never echo their values."""
+    organizations = [s.lower() for s in re.split(r"[\s,;]+", os.environ.get("CARDS_ORGANIZATIONS", "").strip()) if s]
+    if len(organizations) > 32 or any(not re.fullmatch(r"[A-Za-z0-9-]{1,39}", s) for s in organizations):
+        raise RuntimeError("organizations must list at most 32 GitHub organization logins")
+    if len(organizations) != len(set(organizations)):
+        raise RuntimeError("organizations must list unique GitHub organization logins")
+    only = os.environ.get("CARDS_ORGANIZATION_ONLY", "false").strip().lower()
+    if only not in ("true", "false") or only == "true" and not organizations:
+        raise RuntimeError("organization-only must be true or false, and needs at least one configured organization")
+    def unique_object(pairs):
+        result = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError("duplicate key")
+            result[key] = value
+        return result
+
+    try:
+        raw = json.loads(os.environ.get("CARDS_ORGANIZATION_TOKENS", "").strip() or "{}",
+                         object_pairs_hook=unique_object)
+    except (ValueError, TypeError):
+        raise RuntimeError("organization-tokens must be a JSON object of organization installation tokens") from None
+    if not isinstance(raw, dict):
+        raise RuntimeError("organization-tokens must be a JSON object of organization installation tokens")
+    tokens = {}
+    for name, token in raw.items():
+        if (not isinstance(name, str) or name.lower() not in organizations or name.lower() in tokens
+                or not isinstance(token, str) or not re.fullmatch(r"[A-Za-z0-9_.-]{1,4096}", token)):
+            raise RuntimeError("organization-tokens must map configured organizations to valid tokens")
+        tokens[name.lower()] = token
+    return organizations, tokens
+
+
+def repo_owner(owner, repo):
+    return repo.get("owner", owner)
+
+
+def repo_key(owner, repo):
+    account = repo_owner(owner, repo)
+    return repo["name"] if account.lower() == owner.lower() else account.lower() + "/" + repo["name"]
+
+
+def active_token():
+    organizations, tokens = organization_settings()
+    account = (ACCESS_OWNER or "").lower()
+    if PUBLIC_ACCESS:
+        return None
+    if account in organizations:
+        if account in tokens:
+            return tokens[account]
+        if os.environ.get("GH_TOKEN") or os.environ.get("GITHUB_TOKEN"):
+            raise RuntimeError("each configured organization needs its own organization-tokens entry")
+        return None   # a local gh session may already have explicitly granted organization access
+    return os.environ.get("GH_TOKEN") or os.environ.get("GITHUB_TOKEN")
+
+
+def child_env(env=None):
+    plain = env is None
+    env = dict(os.environ if env is None else env)
+    # A process reading one repository has no reason to receive the other installations' credentials.
+    env.pop("CARDS_ORGANIZATION_TOKENS", None)
+    env.pop("CARDS_AUTHORED_IMPORTS", None)
+    if plain:
+        env.pop("GH_TOKEN", None)
+        env.pop("GITHUB_TOKEN", None)
+    return env
+
+
+def github_env():
+    env = child_env()
+    token = active_token()
+    if token:
+        env["GH_TOKEN"] = token
+        env.pop("GITHUB_TOKEN", None)
+    elif PUBLIC_ACCESS:
+        env.pop("GH_TOKEN", None)
+        env.pop("GITHUB_TOKEN", None)
+    return env
+
+
+@contextmanager
+def repository_access(owner, public=False):
+    global ACCESS_OWNER, PUBLIC_ACCESS
+    previous, prior_public, ACCESS_OWNER, PUBLIC_ACCESS = ACCESS_OWNER, PUBLIC_ACCESS, owner, public
+    try:
+        yield
+    finally:
+        ACCESS_OWNER = previous
+        PUBLIC_ACCESS = prior_public
+
+
+def authored_imports(owner):
+    """Exact upload commits the owner identifies as their existing work; this never overrides authorship."""
+    entries = [s for s in re.split(r"[\s,;]+", os.environ.get("CARDS_AUTHORED_IMPORTS", "").strip()) if s]
+    allowed = set(organization_settings()[0]) | {owner.lower()}
+    result = set()
+    if len(entries) > 256:
+        raise RuntimeError("authored-imports may list at most 256 repository and commit pairs")
+    for entry in entries:
+        match = re.fullmatch(r"([A-Za-z0-9-]{1,39})/([A-Za-z0-9._-]{1,100})@([0-9a-fA-F]{40}|[0-9a-fA-F]{64})", entry)
+        if not match or match[1].lower() not in allowed or match[2] in (".", ".."):
+            raise RuntimeError("authored-imports must list configured owner/repository@full-commit-hash pairs")
+        result.add((match[1].lower() + "/" + match[2].lower(), match[3].lower()))
+    return result
+
+
 def list_repositories(owner):
     """Every non-fork repository the account owns, a page of 100 at a time, bar the profile repository, with
     whether it can be read (a disabled or locked repository is counted but never cloned) and whether it is archived
     (its history is read, its head is not in use)."""
+    global PROFILE_OWNER
+    PROFILE_OWNER = owner
+    organizations, _ = organization_settings()
     nodes, cursor = [], None
-    while True:
+    while os.environ.get("CARDS_ORGANIZATION_ONLY", "false").strip().lower() != "true":
         page_args = {"owner": owner}
         if cursor:
             page_args["cursor"] = cursor
@@ -922,24 +1041,75 @@ def list_repositories(owner):
         if not page["pageInfo"]["hasNextPage"]:
             break
         cursor = page["pageInfo"]["endCursor"]
-    return [r for r in nodes if r["name"].lower() != owner.lower()]
+    nodes = [r for r in nodes if r["name"].lower() != owner.lower()]
+    for organization in organizations:
+        cursor, seen, found = None, set(), set()
+        with repository_access(organization):
+            while True:
+                page_args = {"owner": organization}
+                if cursor:
+                    page_args["cursor"] = cursor
+                data = gql("""query($owner: String!, $cursor: String) { repositoryOwner(login: $owner) {
+                    __typename repositories(first: 100, after: $cursor, ownerAffiliations: OWNER, isFork: false,
+                    orderBy: {field: CREATED_AT, direction: ASC}) {
+                    nodes { name isPrivate isDisabled isLocked isArchived } pageInfo { hasNextPage endCursor } } } }""",
+                    **page_args)
+                account = data.get("repositoryOwner")
+                if not isinstance(account, dict) or account.get("__typename") != "Organization":
+                    raise RuntimeError("a configured organization could not be read")
+                page = account["repositories"]
+                for repo in page["nodes"]:
+                    name = repo.get("name") if isinstance(repo, dict) else None
+                    if not isinstance(name, str) or not re.fullmatch(r"[A-Za-z0-9._-]{1,100}", name) or name in (".", ".."):
+                        raise RuntimeError("a configured organization returned invalid repository metadata")
+                    if name.lower() in found:
+                        raise RuntimeError("a configured organization returned duplicate repository metadata")
+                    nodes.append(dict(repo, owner=organization))
+                    found.add(name.lower())
+                if not page["pageInfo"]["hasNextPage"]:
+                    break
+                cursor = page["pageInfo"]["endCursor"]
+                if not isinstance(cursor, str) or not cursor or cursor in seen:
+                    raise RuntimeError("a configured organization returned invalid pagination")
+                seen.add(cursor)
+        if not found:
+            raise RuntimeError("no repositories are visible in a configured organization; check its read token")
+    return nodes
 
 
-def git_auth():
+def git_auth(owner, name):
     """How git authenticates. With GH_TOKEN set (Actions), the token rides in an environment-only
     header, never on a command line. Otherwise gh's own credential helper answers."""
-    token = os.environ.get("GH_TOKEN")
+    if (ACCESS_OWNER is not None and ACCESS_OWNER.lower() != owner.lower()
+            or not re.fullmatch(r"[A-Za-z0-9-]{1,39}", owner)
+            or not re.fullmatch(r"[A-Za-z0-9._-]{1,100}", name) or name in (".", "..")):
+        raise RuntimeError("the repository URL does not match its credential scope")
+    token = active_token()
+    clean = ["-c", "credential.helper=", "-c", "http.extraheader=", "-c", "http.https://github.com/.extraheader="]
+    env = github_env()
+    count = env.get("GIT_CONFIG_COUNT", "").strip()
+    count = int(count) if re.fullmatch(r"[0-9]{1,4}", count) else 0
+    settings = [(env.get("GIT_CONFIG_KEY_%d" % k, ""), env.get("GIT_CONFIG_VALUE_%d" % k, "")) for k in range(count)]
+    settings = [(key, value) for key, value in settings
+                if key and not key.lower().endswith(".extraheader") and key.lower() != "credential.helper"]
+    for key in list(env):
+        if key.startswith(("GIT_CONFIG_KEY_", "GIT_CONFIG_VALUE_")) or key == "GIT_CONFIG_PARAMETERS":
+            env.pop(key)
+    for k, (key, value) in enumerate(settings):
+        env["GIT_CONFIG_KEY_%d" % k], env["GIT_CONFIG_VALUE_%d" % k] = key, value
+    env["GIT_CONFIG_COUNT"] = str(len(settings))
+    if PUBLIC_ACCESS:
+        return clean, env
     if not token:
-        return ["-c", "credential.helper=", "-c", "credential.helper=!gh auth git-credential"], None
-    env = dict(os.environ)
+        return clean + ["-c", "credential.helper=!gh auth git-credential"], env
     basic = base64.b64encode(("x-access-token:" + token).encode()).decode()
     # after any settings the environment already passes this way (a self-hosted runner's certificate bundle or
     # proxy), not over them; a count git would refuse anyway is replaced
-    count = os.environ.get("GIT_CONFIG_COUNT", "").strip()
-    n = int(count) if re.fullmatch(r"[0-9]{1,4}", count) else 0
-    env.update({"GIT_CONFIG_COUNT": str(n + 1), "GIT_CONFIG_KEY_%d" % n: "http.https://github.com/.extraheader",
+    n = len(settings)
+    path = "%s/%s.git" % (owner, name)
+    env.update({"GIT_CONFIG_COUNT": str(n + 1), "GIT_CONFIG_KEY_%d" % n: "http.https://github.com/%s.extraheader" % path,
                 "GIT_CONFIG_VALUE_%d" % n: "AUTHORIZATION: basic " + basic, "GIT_TERMINAL_PROMPT": "0"})
-    return [], env
+    return clean, env
 
 
 def clone(owner, name, dest):
@@ -948,7 +1118,7 @@ def clone(owner, name, dest):
     and is brought to what a fresh clone would hold: its branches and tags fetched and those deleted upstream pruned,
     so a tag a force-push left behind brings in nothing, and its HEAD pointed where the repository's own points now,
     so a default branch renamed or switched since is the one read at the head."""
-    flags, env = git_auth()
+    flags, env = git_auth(owner, name)
     url = "https://github.com/%s/%s.git" % (owner, name)
     if os.path.isdir(dest):
         run(["git", "-C", dest, "remote", "set-url", "origin", url])
@@ -979,7 +1149,7 @@ READ_CONFIG = ["-c", "core.quotepath=off", "-c", "log.showRoot=true", "-c", "log
 def read_env():
     """The environment a reading git runs in: the system attributes file left out (GIT_ATTR_NOSYSTEM), and the
     variables that would change a diff's shape (GIT_DIFF_OPTS, GIT_EXTERNAL_DIFF) removed."""
-    env = dict(os.environ, GIT_ATTR_NOSYSTEM="1")
+    env = dict(child_env(), GIT_ATTR_NOSYSTEM="1")
     for name in ("GIT_DIFF_OPTS", "GIT_EXTERNAL_DIFF"):
         env.pop(name, None)
     return env
@@ -1228,12 +1398,14 @@ def seed_blobs(full_name, dest):
     repositories whose files it would have told apart."""
     if not re.fullmatch(r"[A-Za-z0-9-]{1,39}/[A-Za-z0-9._-]{1,100}", full_name):
         return None
-    flags, env = git_auth()
-
     def read():
         try:
-            run(["git"] + flags + ["clone", "--bare", "--quiet", "--filter=blob:none",
-                                   "https://github.com/%s.git" % full_name, dest], env=env, timeout=300)
+            account, name = full_name.split("/", 1)
+            public = account.lower() not in organization_settings()[0] and account.lower() != (PROFILE_OWNER or "").lower()
+            with repository_access(account, public=public):
+                flags, env = git_auth(account, name)
+                run(["git"] + flags + ["clone", "--bare", "--quiet", "--filter=blob:none",
+                                       "https://github.com/%s.git" % full_name, dest], env=env, timeout=300)
             return run(["git", "-C", dest, "rev-list", "--objects", "--all", "--missing=print"], timeout=300)
         finally:
             if os.path.isdir(dest):
@@ -1245,7 +1417,7 @@ def seed_blobs(full_name, dest):
     return {line[1:].strip() for line in out.decode("ascii", "replace").splitlines() if line.startswith("?")}
 
 
-def templates(owner):
+def templates(owner, profile_owner=None):
     """The template each repository was made from, when that is another account's: {name: owner/name}, or {name:
     None} for a repository whose template GitHub answers with an error for, as it may for a template the token
     cannot see. Asked apart from the listing, so such a template never fails the listing, and each page is asked
@@ -1274,7 +1446,7 @@ def templates(owner):
                 if not isinstance(node, dict) or not isinstance(node.get("name"), str):
                     return None
                 made = (node.get("templateRepository") or {}).get("nameWithOwner") or ""
-                if made and made.split("/")[0].lower() != owner.lower():
+                if made and made.split("/")[0].lower() != (profile_owner or owner).lower():
                     found[node["name"]] = made
                 elif k in unseen and not made:
                     found[node["name"]] = None
@@ -1305,19 +1477,32 @@ def resolve_authors(owner, samples):
     GitHub answers with an error or with nothing for, as for a repository deleted since it was read. Each query is
     asked twice before giving up. Raises RuntimeError if GitHub cannot be asked, or answers with an error that names
     no address, so the caller never guesses (see collect)."""
+    global PROFILE_OWNER
+    PROFILE_OWNER = owner
     if not re.fullmatch(r"[A-Za-z0-9-]{1,39}", owner):
         raise RuntimeError("the account's login cannot be looked up")
-    found, items = {}, [(e, s) for e, s in samples.items()
-                        if re.fullmatch(r"[A-Za-z0-9._-]{1,100}", s[0]) and re.fullmatch(r"[0-9a-f]{40,64}", s[1])]
-    for k in range(0, min(len(items), RESOLVE_CALLS * ALIASES), ALIASES):
-        batch, by_repo = items[k:k + ALIASES], {}
+    found, groups = {}, {}
+    for email, sample in samples.items():
+        if not isinstance(sample, (list, tuple)) or len(sample) != 2 or not all(isinstance(s, str) for s in sample):
+            continue
+        name, sha = sample
+        account, name = name.split("/", 1) if "/" in name else (owner, name)
+        if (re.fullmatch(r"[A-Za-z0-9-]{1,39}", account)
+                and re.fullmatch(r"[A-Za-z0-9._-]{1,100}", name) and name not in (".", "..")
+                and re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", sha)):
+            groups.setdefault(account.lower(), []).append((email, (name, sha)))
+    batches = [(account, items[k:k + ALIASES]) for account, items in groups.items()
+               for k in range(0, min(len(items), RESOLVE_CALLS * ALIASES), ALIASES)][:RESOLVE_CALLS]
+    for account, batch in batches:
+        by_repo = {}
         for j, (_, (name, sha)) in enumerate(batch):
             by_repo.setdefault(name, []).append((j, sha))
         query = " ".join('r%d: repository(owner: "%s", name: "%s") { %s }' % (
-            r, owner, name, " ".join('c%d: object(oid: "%s") { ... on Commit { author { user { login } } } }' % pair
-                                     for pair in shas))
+            r, account, name, " ".join('c%d: object(oid: "%s") { ... on Commit { author { user { login } } } }' % pair
+                                       for pair in shas))
             for r, (name, shas) in enumerate(by_repo.items()))
-        data, errors = again(lambda: answered("query { %s }" % query))
+        with repository_access(account):
+            data, errors = again(lambda: answered("query { %s }" % query))
         failed = set()   # what an error names: ("r1",) for a whole repository, ("r1", "c3") for one commit
         for e in errors:
             path = e.get("path") if isinstance(e, dict) else None
@@ -1361,6 +1546,9 @@ def authorship(owner, commits, identity, repos, notes=None):
     coding agent's own (AGENT_NAME); the owner's own linked addresses count as other addresses there. One GitHub was
     not asked about, past the lookup's limit or unanswered, counts only under such a name.
 
+    In another account's organization repositories, the name and solo-repository fallbacks are disabled:
+    only a linked owner address, owner noreply identity or explicitly listed non-conflicting address counts.
+
     The lookup asks first the addresses listed in CARDS_AUTHOR_EMAILS, then those found in more of the account's
     repositories (the owner's own recur; a mirrored project's thousand authors each sit in one), those under a
     name the owner uses, those alone in a repository, and then the most used, so the ones whose answer is likeliest
@@ -1390,7 +1578,9 @@ def authorship(owner, commits, identity, repos, notes=None):
         where.setdefault(c.email, set()).add(c.repo)
         called.setdefault(c.email, set()).add(c.name.casefold())
         per_repo.setdefault(c.repo, set()).add(c.email)
-        samples.setdefault(c.email, (repos[c.repo]["name"], c.sha))
+        # Prefer an organization sample so a shared address cannot inherit a personal repository's fallback.
+        if c.email not in samples or repo_owner(owner, repos[c.repo]).lower() != owner.lower():
+            samples[c.email] = (repo_key(owner, repos[c.repo]), c.sha)
 
     def own_names():   # the names the owner's own commits, login and profile use, that tell a person
         found = {n for n in (c.name.casefold() for c in human if c.email in mine)
@@ -1415,13 +1605,14 @@ def authorship(owner, commits, identity, repos, notes=None):
     owned, agents = set(), set()
     for c in human:
         pair = (c.repo, c.email)
-        if c.email in mine or (c.email not in theirs and c.name.casefold() in names):
+        organization = repo_owner(owner, repos[c.repo]).lower() != owner.lower()
+        if c.email in mine or (not organization and c.email not in theirs and c.name.casefold() in names):
             owned.add(pair)
         elif c.email in theirs or c.email in unknown:
             continue
         elif agent_name(c.name):
             agents.add(pair)
-        elif len(per_repo[c.repo]) == 1:
+        elif not organization and len(per_repo[c.repo]) == 1:
             owned.add(pair)
     if notes is not None:
         notes.update(agents=agents, refused=len(listed & theirs & set(uses)), unknown=unknown)
@@ -4394,9 +4585,13 @@ def collect(owner, repos, work, since=None):
     fallback (see read_added_code), numstat's counts for a repository whose diffs cannot be read among them, and
     code["approximate_in_use"] the lines in use read so, code["approximate_imports"] the lines of imports counted by
     numstat; code["attributes_unread"] counts the repositories whose .gitattributes git could not read."""
-    global RESERVE, TRACE
+    global RESERVE, TRACE, PROFILE_OWNER
+    PROFILE_OWNER = owner
     now = time.time()   # the run's now, returned: main cuts what is written by it too (window_holds)
     all_commits, mismatched, unread, ignore = [], 0, 0, set()
+    organization_unread = 0
+    uploads = authored_imports(owner)
+    credited_uploads = []
     code, head = {}, {}   # by repository: what each file version adds, and what stands at the head
     skip, attributes_unread = {}, 0   # by repository: the (commit, path) its .gitattributes marks as not its own
     order = {}   # (repository, commit): its place in git's listing, children first (see read_commits)
@@ -4409,6 +4604,17 @@ def collect(owner, repos, work, since=None):
     # that could not tell the owner's code from others' stops before it reads anything (see main).
     unchecked = set()   # the lookups GitHub could not answer (UNCHECKED)
     made, identity = templates(owner), owner_identity(owner)
+    accounts = {repo_owner(owner, r).lower() for r in repos if repo_owner(owner, r).lower() != owner.lower()}
+    if accounts and identity is not None and not identity["user"]:
+        unchecked.add("authorship")
+    if made is not None:
+        for account in sorted(accounts):
+            with repository_access(account):
+                extra = templates(account, owner)
+            if extra is None:
+                made = None
+                break
+            made.update({account + "/" + name: source for name, source in extra.items()})
     if made is None:
         unchecked.add("templates")
     if identity is None:
@@ -4432,16 +4638,18 @@ def collect(owner, repos, work, since=None):
     # A repository made from a template whose files cannot be listed, or seen at all, holds files no one can tell from
     # the owner's own, so it is left out and counted, as one that cannot be read is; so is a relay copy when
     # coderprint's own files cannot be listed (below). Guessing either way would count others' code or drop the owner's.
-    readable = {r["name"] for r in repos if not (r.get("isDisabled") or r.get("isLocked"))}
+    readable = {repo_key(owner, r) for r in repos if not (r.get("isDisabled") or r.get("isLocked"))}
     unsure = {name for name, t in made.items() if t is None or t in unlisted} & readable
     saved, RESERVE = RESERVE, RESERVE + LOOKUP_RESERVE   # reading stops in time for the lookup after it (authorship)
     try:
         for i, r in enumerate(repos):
-            if r.get("isDisabled") or r.get("isLocked") or r["name"] in unsure:
+            if r.get("isDisabled") or r.get("isLocked") or repo_key(owner, r) in unsure:
                 continue   # counted in the listing, never cloned
-            dest = slot(work, owner, r["name"])
+            account = repo_owner(owner, r)
+            dest = slot(work, account, r["name"])
             try:
-                commits, bad, sweeps = read_repository(owner, r["name"], dest, i)
+                with repository_access(account):
+                    commits, bad, sweeps = read_repository(account, r["name"], dest, i)
                 marked = attributed_versions(dest, commits) if commits else set()
                 skip[i] = marked or set()
                 if commits:   # read while the clone is still on disk; each apart, so a head that cannot be read costs
@@ -4485,6 +4693,7 @@ def collect(owner, repos, work, since=None):
                     attributes_unread += 1
             except RuntimeError:
                 unread += 1
+                organization_unread += account.lower() != owner.lower()
                 continue
             finally:
                 if not os.environ.get("CLONE_CACHE") and os.path.isdir(dest):
@@ -4502,7 +4711,7 @@ def collect(owner, repos, work, since=None):
         for c in all_commits:
             held.setdefault(c.repo, set()).update(f.path for f in c.files if f.path in RELAY_FILES)
         relay = {i for i, paths in held.items() if paths >= RELAY_FILES}
-        unsure |= {repos[i]["name"] for i in relay}
+        unsure |= {repo_key(owner, repos[i]) for i in relay}
         all_commits = [c for c in all_commits if c.repo not in relay]
         for i in relay:
             code.pop(i, None)
@@ -4705,6 +4914,10 @@ def collect(owner, repos, work, since=None):
     for c in sorted(all_commits, key=lambda c: (c.ts, c.repo, -order[(c.repo, c.sha)])):
         if c.sha in shas:
             continue
+        organization = repo_owner(owner, repos[c.repo]).lower() != owner.lower()
+        # A mirror with unknown organization attribution must wait for the copy whose authorship was established.
+        if organization and mine is not None and (c.repo, c.email) not in mine and c.sha in owned:
+            continue
         shas.add(c.sha)
         live = [f for f in c.files if f.status != "D" and not f.blob.startswith("0000000")]
         fresh = [f for f in live if f.blob not in seen]
@@ -4727,7 +4940,7 @@ def collect(owner, repos, work, since=None):
                 if f.blob in side_blobs.get((c.repo, f.path), ()):
                     side.pop((c.repo, f.path), None)
                     side_blobs.pop((c.repo, f.path), None)
-        theirs_commit = owned is not None and c.sha not in owned
+        theirs_commit = owned is not None and (c.sha not in owned or (organization and (c.repo, c.email) not in mine))
         why = ("automation" if c.bot or (theirs_commit and c.sha in agents) else "others" if theirs_commit
                else "copied" if copied else None)
         theirs = skip.get(c.repo) or ()
@@ -4783,6 +4996,11 @@ def collect(owner, repos, work, since=None):
                       and (added is None or added.get((c.sha, f.blob)) is not GENERATED_VERSION)]
         brought = c.sha not in ignore and (c.sha in parts or len(new_code_files(c, added, theirs, moved(c), counted))
                                            > IMPORT_FILES)
+        declared = (repo_owner(owner, repos[c.repo]).lower() + "/" + repos[c.repo]["name"].lower(), c.sha) in uploads
+        claimed_upload = brought and declared
+        if claimed_upload:
+            # This is an explicit claim about one upload, after all author, bot, template and file filters.
+            brought = False
         if c.sha in ignore or brought:
             if repeat is not None:
                 pass   # its first landing already brought it in, or handed its lines on
@@ -4811,7 +5029,10 @@ def collect(owner, repos, work, since=None):
                 if waiting:
                     for h in added.get((c.sha, f.blob), NO_LINES)[0]:
                         waiting.take(h)
+        before = len(events)
         take(c, fresh, swept, added, theirs, True, in_window, repeat, repeat_ids, wrote, wrote_ids, on_side)
+        if claimed_upload and repeat is None and in_window:
+            credited_uploads.append((c.ts, sum(n for _, _, n in events[before:])))
         if wrote:
             record[1] |= wrote
             for h, o in wrote_ids:
@@ -4946,7 +5167,8 @@ def collect(owner, repos, work, since=None):
                         rough_in_use += s.rough[k]
     return {"events": events, "commits": commit_times, "imports": import_times, "import_lines": import_lines,
             "mismatched": mismatched, "unread": unread, "left_out": dict(left_out), "left_out_times": left_times,
-            "unchecked": sorted(unchecked), "unsure": unsure, "copies": {repos[k]["name"] for k in holding - writing},
+            "unchecked": sorted(unchecked), "unsure": unsure, "copies": {repo_key(owner, repos[k]) for k in holding - writing},
+            "organization_unread": organization_unread, "authored_imports": credited_uploads,
             "authors": {"unknown": len(unknown), "commits": unverified, "refused": notes.get("refused", 0)},
             "code": {"production": in_use[0], "tests": in_use[1], "unread": sum(1 for v in code.values() if v is None),
                      "heads_unread": sum(1 for v in head.values() if v is None),
@@ -6906,7 +7128,8 @@ def empty_words(window, has_history):
     """What the chart says when the window holds no lines: that older work exists, or that the account's own
     repositories hold none that counts (its commits may still be there, in notebooks or data, or its code in
     repositories it does not own)."""
-    return "nothing in the last " + WINDOWS[window][1] if has_history else "no counted code in own repos"
+    return ("nothing in the last " + WINDOWS[window][1] if has_history else
+            "no counted code in selected repos" if organization_settings()[0] else "no counted code in own repos")
 
 
 def stream_block(window, stream, column, S, c, has_history, recent_day=None):
@@ -7398,16 +7621,22 @@ def card_data(owner, window, now, zone, start, S, repos, private, data, stats, s
                              "read_without_gitattributes": loc.get("attributes_unread", 0),
                              "archived": loc.get("archived", 0),
                              "left_out_as_unattributable": len(unsure)},
-            "owned_only": True, "forks": "excluded",
+            "owned_only": not any(repo_owner(owner, r).lower() != owner.lower() for r in repos), "forks": "excluded",
+            "organization_repositories": sum(repo_owner(owner, r).lower() != owner.lower() for r in repos),
+            "organization_only": os.environ.get("CARDS_ORGANIZATION_ONLY", "false").strip().lower() == "true",
             # the repository named after the account is left out (list_repositories): a person's profile
             # repository, but not an organization's, which is its .github repository
             "profile_repository": "excluded" if (profile or owner).lower() == owner.lower() else "counted",
             "visibility": "public and private" if private else "public only",
             "branches": "every branch; gh-pages only when it is the default",
-            "authorship": "the owner's own commits (an organization's card counts every member)",
+            "authorship": "the personal owner's own commits, including configured organizations; an organization's own card counts every member",
             # whether GitHub was asked whose each commit is: true in every file written, since a run that could not
             # ask keeps the existing panels and this file with them (see collect's "unchecked" and main)
             "authorship_checked": not data.get("unchecked"),
+            "organization_authorship": "GitHub-linked owner identity or explicitly listed, non-conflicting address",
+            "declared_authored_uploads": {"commits": len(data.get("authored_imports", [])),
+                                         "loc": sum(n for _, n in data.get("authored_imports", [])),
+                                         "provenance": "owner declaration, filtered by authorship and file exclusions"},
             "unverified_authors": {"addresses": authors.get("unknown", 0), "commits": authors.get("commits", 0),
                                    "definition": "#/definitions/unverified_author"}},
         "quantity": {
@@ -7469,7 +7698,8 @@ def caption_parts(private):
     """What the panel counts, in three parts, each short enough for a line of the compact caption and all three
     for one line of the wide one: whose repositories, which of them, and what a line is (a line added in a new
     file version, so a rewrite counts again)."""
-    return ["own repos, no forks", "public + private" if private else "public only", "each file version counted once"]
+    scope = "your code, no forks" if organization_settings()[0] else "own repos, no forks"
+    return [scope, "public + private" if private else "public only", "each file version counted once"]
 
 
 def panel_svg(theme, window, S, c, new_lines, spark, rows, stream, column, has_history, mark_polys, turn,
@@ -7927,6 +8157,10 @@ def main():
             "from what others wrote, and the existing panels are kept. The next run tries again."
             % " or ".join(UNCHECKED[u] for u in data["unchecked"]))
         return 1
+    if data.get("organization_unread") or any("/" in name for name in data.get("unsure", ())):
+        say("::warning::A configured organization repository could not be read or attributed; the existing panels "
+            "are kept. Check the organization installation's read access and rerun.")
+        return 1
     unsure = data.get("unsure") or set()
     if data["unread"]:
         say("::warning::%d of %d repositories could not be read, even on a second try, and %s left out of the panel"
@@ -7951,7 +8185,7 @@ def main():
             "owner's" % ((refused, "address", "belongs", "its") if refused == 1 else
                          (refused, "addresses", "belong", "their")))
     # a repository holding only others' file versions (a relay copy), or left out, makes nothing of the owner's private
-    private = sum(1 for r in repos if r["isPrivate"] and r["name"] not in data["copies"] and r["name"] not in unsure)
+    private = sum(1 for r in repos if r["isPrivate"] and repo_key(owner, r) not in data["copies"] and repo_key(owner, r) not in unsure)
 
     now = data["now"]
     if not zone_database():   # said whatever the profile shows, so the line tells a reader nothing about it

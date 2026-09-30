@@ -12,6 +12,18 @@ inputs:
   owner:
     description: The account to draw for. It must be the account this repository belongs to; coderprint draws a card only for its own owner.
     default: ${{ github.repository_owner }}
+  organizations:
+    description: Organization logins whose repositories should be scanned for your own contributions, separated by commas or spaces. Optional.
+    default: ""
+  organization-only:
+    description: Count only your own contributions in the configured organizations, excluding personally owned repositories.
+    default: "false"
+  organization-tokens:
+    description: A JSON object mapping each configured organization to its read-only installation token. Pass token outputs or a secret; never put tokens in workflow text.
+    default: ""
+  authored-imports:
+    description: Exact owner/repository@full-commit-hash uploads you declare as your existing authored work. Overrides the bulk-import heuristic for those commits after author and file exclusions. Optional; use a secret for private repository names.
+    default: ""
   window:
     description: The span the panel covers, one of all, 10y, 5y, 3y, 2y, 12m.
     default: all
@@ -51,6 +63,10 @@ runs:
       env:
         GH_TOKEN: ${{ inputs.token }}
         CARDS_OWNER: ${{ inputs.owner }}
+        CARDS_ORGANIZATIONS: ${{ inputs.organizations }}
+        CARDS_ORGANIZATION_ONLY: ${{ inputs.organization-only }}
+        CARDS_ORGANIZATION_TOKENS: ${{ inputs.organization-tokens }}
+        CARDS_AUTHORED_IMPORTS: ${{ inputs.authored-imports }}
         CARDS_WINDOW: ${{ inputs.window }}
         CARDS_THEME: ${{ inputs.theme }}
         CARDS_SPOTIFY_UID: ${{ inputs.spotify-uid }}
