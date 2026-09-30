@@ -141,23 +141,36 @@ Set `organizations` to the organization logins to scan. Leave `organization-only
 
 ### Manual organization updates without an App
 
-Keep the daily Action configured for your personally owned repositories. Run `tools/refresh-organizations.py` locally, using your existing `gh` sign-in, to draw a separate organization-only card. No App installation or organization credential in the daily workflow is needed. Your sign-in must already have read access to the organization repositories.
+Use one blended card with fresh personal history and the latest saved organization history. Run the organization scan locally with your existing `gh` sign-in; no App installation or organization token in the daily workflow is needed. Your local sign-in must already have read access to those repositories. The daily Action reads an authenticated encrypted snapshot from a **private personally owned snapshot repository**, then feeds both histories through the same collector. Shared commits, file versions and in-use lines are deduplicated across both scopes. The snapshot store itself is excluded from your contributions.
 
-An existing personal card can use either the current `assets/coderprint.json` or the recognized earlier `assets/cards.json` format. The manual organization refresh does not require redrawing or replacing the personal card first.
+Clone your profile repository and a private personal repository dedicated to the snapshot. Create a key outside all Git checkouts with `tools/create-snapshot-key.py`; it stores a current-user DPAPI-protected key on Windows, or a file readable only by you on Linux, and configures the profile's snapshot key and store secrets. The optional snapshot feature uses the hash-pinned `cryptography` dependency; normal live scanning uses the standard library.
 
 From a coderprint checkout, with Python 3.12 or later, `gh` and `git` installed:
 
 ```sh
-timeout -k 30 1200 python3 tools/refresh-organizations.py \
-  --profile-dir /path/to/YOUR-LOGIN \
-  --organizations YOUR-ORG --time-limit 1100
+timeout -k 5 60 python3 tools/create-snapshot-key.py \
+  --key-file /private/path/coderprint.key --profile YOURNAME/YOURNAME \
+  --snapshot-store YOURNAME/PRIVATE-STORE --time-limit 50
+
+timeout -k 10 120 python3 -m pip install --only-binary=:all: --require-hashes -r requirements-snapshot.txt
+
+timeout -k 30 1900 python3 tools/refresh-blended.py \
+  --profile-dir /path/to/profile --snapshot-dir /path/to/private-store \
+  --key-file /private/path/coderprint.key --organizations YOUR-ORG --time-limit 1800
 ```
 
-On Windows, use your bounded process launcher with a 1,200-second deadline and the same Python arguments. The helper also requires an explicit `--time-limit` for its collection step. An optional `--authored-imports-file` reads your exact upload declarations from a local UTF-8 file; keep that file outside tracked/public files when it contains private repository names. `--clone-cache` can reuse an isolated local collection cache.
+On Windows, use your bounded process launcher with the same finite deadlines and Python arguments. The helper also requires an explicit `--time-limit` for its collection. An optional `--authored-imports-file` reads exact upload declarations from a private local UTF-8 file; that file must remain outside tracked/public files.
 
-The helper writes only aggregate data and panels under `assets/organizations/`, and a separate README block labeled **Organization contributions**, **manually refreshed**, and its update date. It checks the signed-in account, leaves the personal card intact, and keeps existing organization output if the scan fails. Commit and push the generated organization files and README when you want to publish the refresh. The daily personal Action preserves them.
+The helper stages and verifies the complete organization histories, template evidence and authorship evidence, then prepares `organization.snapshot` in the private store and the usual aggregate panels in your profile. Publish the encrypted store first, then the profile outputs. Only ciphertext belongs in the store; keys, decrypted histories and private upload selectors must never be committed. A failure does not push anything; inspect any local changes before retrying.
 
-The personal and organization cards are separate views with separate update dates. Their figures are not a deduplicated combined total: code copied between the two scopes can appear in both. Neither the local selector file nor any credential should be committed.
+Keep `organizations` and `organization-tokens` unset in the daily Action and supply:
+
+```yaml
+snapshot-store: ${{ secrets.CODERPRINT_ORGANIZATION_SNAPSHOT_REPOSITORY }}
+organization-snapshot-key: ${{ secrets.CODERPRINT_ORGANIZATION_SNAPSHOT_KEY }}
+```
+
+The card remains one blended view. Its data file records the organization snapshot's UTC capture date. Organization changes after that scan enter the next manual refresh. A missing key, unreadable private store, invalid snapshot, identity mismatch or rollback keeps the existing card. If you specifically want an organization-only card instead, `tools/refresh-organizations.py` remains available.
 
 ### Automatic organization updates
 
@@ -198,6 +211,9 @@ If you upload your own existing project in one large commit, the 500-file import
 | `organizations` | none | Organization logins to scan for your own commits, separated by commas or spaces. |
 | `organization-only` | `false` | Count only your contributions in the configured organizations. Requires `organizations`. |
 | `organization-tokens` | none | JSON mapping each configured organization login to its read-only installation token. Pass token outputs or a secret. |
+| `snapshot-store` | none | Private personal repository holding encrypted `organization.snapshot`; downloaded with the personal read token and excluded from contributions. Pass its name from a secret. |
+| `organization-snapshot-key` | none | Base64 decryption key from a secret, required for saved organization history. |
+| `organization-snapshot` | none | An already downloaded encrypted snapshot path, for local or custom workflows. |
 | `authored-imports` | none | Exact `owner/repository@full-commit-hash` uploads declared as your existing work. Overrides the bulk-import heuristic after attribution and file exclusions; use a secret for private names. |
 | `window` | `all` | The span everything covers: `all`, `10y`, `5y`, `3y`, `2y` or `12m`. The chart starts at your oldest real work inside it, so it never shows empty time. |
 | `theme` | none | Pins one theme: `paper`, `sepia`, `sage`, `oxblood` or `ink`. Visitors in light mode still get its light version and those in dark mode its dark one. Left out, the five take turns, one a day. |
