@@ -5,6 +5,7 @@ import { readFileSync } from 'node:fs';
 import { buildCard, buildCompactCard, nowPlaying, readCompactPanel, svgInner } from '../lib/compose.js';
 import { PALETTE, PANEL_SVG, PIXEL, RASTERS, appleSvg, compactPanelSvg, spotifySvg, withoutVinylTexture } from './fixtures.js';
 import { VINYL_TEXTURE } from '../lib/vinyl-texture.js';
+import { enclosedOpening, readPngAlpha } from './vinyl-png.js';
 
 const providers = {
   spotify: (options = {}) => spotifySvg({ artist: 'Shared Artist', song: 'Shared Song', cover: PIXEL, ...options }),
@@ -44,6 +45,42 @@ function withoutMotion(css) {
 }
 
 describe('the shared native vinyl artwork', () => {
+  it('aligns the measured texture opening with the label and rotation pivot in every music slot', () => {
+    const png = readPngAlpha(readFileSync(new URL('../assets/vinyl/record-material.png', import.meta.url)));
+    const opening = enclosedOpening(png);
+    assert.ok(opening.pixels > png.width * png.height / 10, 'the measured component is the album opening');
+    const number = (tag, name) => {
+      const match = tag.match(new RegExp(`\\b${name}="(-?[\\d.]+)"`));
+      assert.ok(match, `rendered ${name} is numeric`);
+      return Number(match[1]);
+    };
+    const errors = [];
+    for (const service of Object.keys(providers)) {
+      for (const layout of ['wide', 'compact']) {
+        const vinyl = record(render(service, layout));
+        const texture = vinyl.match(/<image\b[^>]*data-vinyl-texture="true"[^>]*>/)?.[0];
+        const label = vinyl.match(/<clipPath id="relay-vinyl-label">(<circle\b[^>]*>)/)?.[1];
+        assert.ok(texture && label, 'the rendered material and label are present');
+        assert.match(texture, /preserveAspectRatio="none"/, 'bitmap coordinates map directly into the viewBox');
+        const viewBox = vinyl.match(/viewBox="([\d. -]+)"/)[1].split(/\s+/).map(Number);
+        const pivot = styles(vinyl).match(/\.relay-vinyl-record[^{}]*\{[^}]*transform-box:view-box;transform-origin:([\d.]+)% ([\d.]+)%/);
+        assert.ok(pivot, 'rotation uses an explicit viewBox pivot');
+        const mapped = [number(texture, 'x') + opening.cx * number(texture, 'width') / png.width,
+          number(texture, 'y') + opening.cy * number(texture, 'height') / png.height];
+        const centers = {
+          label: [number(label, 'cx'), number(label, 'cy')],
+          pivot: [viewBox[0] + viewBox[2] * Number(pivot[1]) / 100,
+            viewBox[1] + viewBox[3] * Number(pivot[2]) / 100],
+        };
+        for (const [name, center] of Object.entries(centers)) {
+          const distance = Math.hypot(mapped[0] - center[0], mapped[1] - center[1]);
+          if (distance > 0.05) errors.push(`${service} ${layout}: opening (${mapped.map(n => n.toFixed(4)).join(', ')}) differs from ${name} (${center.join(', ')}) by ${distance.toFixed(4)} SVG units`);
+        }
+      }
+    }
+    assert.equal(errors.length, 0, errors.join('\n'));
+  });
+
   it('embeds the exact committed WebP texture without an additional image request', () => {
     const bytes = readFileSync(new URL('../assets/vinyl/record-material.webp', import.meta.url));
     assert.equal(bytes.subarray(0, 4).toString(), 'RIFF');
