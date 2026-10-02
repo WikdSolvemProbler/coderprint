@@ -7,7 +7,7 @@
 </p>
 
 <p align="center">
-  <a href="#tour-of-coderprint">Tour</a>&nbsp;&nbsp;·&nbsp;&nbsp;<a href="#install">Install</a>&nbsp;&nbsp;·&nbsp;&nbsp;<a href="#options">Options</a>&nbsp;&nbsp;·&nbsp;&nbsp;<a href="#your-contributions-in-organizations">Organizations</a>&nbsp;&nbsp;·&nbsp;&nbsp;<a href="#for-machines">For machines</a>&nbsp;&nbsp;·&nbsp;&nbsp;<a href="#privacy">Privacy</a>&nbsp;&nbsp;·&nbsp;&nbsp;<a href="#license">License</a>
+  <a href="#tour-of-coderprint">Tour of coderprint</a>&nbsp;&nbsp;·&nbsp;&nbsp;<a href="#install">Install</a>&nbsp;&nbsp;·&nbsp;&nbsp;<a href="#options">Options</a>&nbsp;&nbsp;·&nbsp;&nbsp;<a href="#your-contributions-in-organizations">Organizations</a>&nbsp;&nbsp;·&nbsp;&nbsp;<a href="#for-machines">For machines</a>&nbsp;&nbsp;·&nbsp;&nbsp;<a href="#privacy">Privacy</a>&nbsp;&nbsp;·&nbsp;&nbsp;<a href="#license">License</a>
 </p>
 
 <picture>
