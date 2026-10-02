@@ -8,4 +8,6 @@
 
 The material and current album art rotate in one SVG group. Separate soft light lobes stay in screen space, with a subtle two-degree shift and six-percent intensity change. A luminance mask reuses the same rotating material to make the light respond to the ridges and grain; an annular clip excludes the label. All motion is disabled for reduced-motion preferences.
 
+The renderer centers the material by its measured inner opening at source pixel `(626, 599)` in the 1254-pixel square, rather than by the outer silhouette's bounding box. The opening, artwork and rotation pivot share the same point. Uniform scaling keeps opaque material beyond the outer disc clip at every angle. The alignment regression measures the opening from the source PNG's alpha channel; after any texture replacement, remeasure its center and edge coverage.
+
 This separation follows [SongArt's rotating-material and stationary-light implementation](https://github.com/sansoo1972/songart/blob/d2f4798c4ee9809a7342252822f651170a0f61b4/src/display.rs). No SongArt code, assets or runtime dependencies are included. SVG transform origins use the fixed `0 0 100 100` view box, following [MDN's transform-origin documentation](https://developer.mozilla.org/en-US/docs/Web/SVG/Reference/Attribute/transform-origin).
