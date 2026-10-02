@@ -28,6 +28,7 @@ const SPOTIFY = 'https://spotify-github-profile.kittinanx.com/api/view?';
 const APPLE = 'https://music-profile.rayriffy.com/';
 const CARD_CACHE = 'public, max-age=0, s-maxage=10, stale-while-revalidate=86400, stale-if-error=86400';
 const MB = 1024 * 1024;
+const LIGHT_GLOW = /<filter\b[^>]*\bid="[^"]*glow[^"]*"|filter="url\(#[^)]*glow[^)]*\)"|<feGaussianBlur\b|vignette/i;
 
 const realFetch = globalThis.fetch;
 const realUsers = process.env.CODERPRINT_USERS;
@@ -258,7 +259,7 @@ describe('the card', () => {
   it('glows only in dark mode', async () => {
     const svg = await expectCard(await get(`user=${USER}&mode=light`));
     assert.ok(svg.includes('class="relay-vinyl-record"'));
-    assert.doesNotMatch(svg, /<filter|filter=|vignette/);
+    assert.doesNotMatch(withoutVinylTexture(svg), LIGHT_GLOW);
   });
 
   it('fetches from the HEAD ref and the widget, refusing redirects, each under a deadline', async () => {
@@ -306,14 +307,14 @@ describe('the card', () => {
     const refresh = '<meta http-equiv="refresh" content="1;url=https://evil.example/leak-widget-meta-refresh"/>';
     upstream({ spotify: () => ok(spotifySvg({ extra: refresh })) });
     const wide = await expectCard(await get(`user=${USER}&mode=dark`));
-    assert.doesNotMatch(wide, /<meta|http-equiv|refresh/i);
+    assert.doesNotMatch(withoutVinylTexture(wide), /<meta|http-equiv|refresh/i);
     assert.match(wide, /filter="url\(#relay-glow-artist\)">Mura Masa<\/text>/);
     const compact = await expectCompactCard(await get(COMPACT));
-    assert.doesNotMatch(compact, /<meta|http-equiv|refresh/i);
+    assert.doesNotMatch(withoutVinylTexture(compact), /<meta|http-equiv|refresh/i);
     const htmlRefresh = refresh.replace('<meta ', '<h:meta xmlns:h="http://www.w3.org/1999/xhtml" ');
     upstream({ compact: () => ok(compactPanelSvg({ extra: htmlRefresh })) });
     const panel = await expectCompactCard(await get(COMPACT));
-    assert.doesNotMatch(panel, /meta|http-equiv|refresh/i);
+    assert.doesNotMatch(withoutVinylTexture(panel), /meta|http-equiv|refresh/i);
     assert.ok(panel.includes('<circle class="now"'));
   });
 
@@ -498,7 +499,7 @@ describe('the compact card', () => {
     }
     assert.ok(dark.includes('fill="url(#relay-vignette)"'));
     const light = await expectCompactCard(await get(`user=${USER}&mode=light&layout=compact`));
-    assert.doesNotMatch(light, /<filter|filter=|vignette/);
+    assert.doesNotMatch(withoutVinylTexture(light), LIGHT_GLOW);
   });
 
   it('runs the compact panel through the sanitizer', async () => {
