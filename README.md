@@ -238,7 +238,7 @@ The Spotify track comes from [kittinan/spotify-github-profile](https://github.co
 
 The Apple Music track comes from [rayriffy/apple-music-github-profile](https://github.com/rayriffy/apple-music-github-profile) by Phumrapee Limpianchop ([rayriffy](https://github.com/rayriffy)), under the GNU Affero General Public License 3.0. coderprint draws its own Apple Music card from the song, artist and cover that project's card names, and copies none of that project's code.
 
-The vinyl disc shading and groove treatment are adapted from [h-moi/home-assistant-vinyl-player](https://github.com/h-moi/home-assistant-vinyl-player), under the MIT License. Its license and pinned source attribution are retained in [NOTICE.md](NOTICE.md).
+The vinyl texture is enhanced from the record reference images supplied by the project owner. Its source bitmap and editing prompt are retained in [assets/vinyl](assets/vinyl/README.md). The artwork rotates independently of subtle movement in the record's reflected light; both remain still for reduced-motion visitors.
 
 The place table, `places.tsv.gz`, is [GeoNames](https://www.geonames.org) data, trimmed to names, populations and time zones, with names folded to plain lowercase and a few common alternative names added by `tools/build_places.py`, and is licensed, like that data, under [Creative Commons Attribution 4.0](https://creativecommons.org/licenses/by/4.0/). GeoNames provides the data as is, without warranty or any representation of accuracy, timeliness or completeness.
 

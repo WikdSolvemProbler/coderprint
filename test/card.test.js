@@ -18,6 +18,7 @@ import {
   coderprintJson,
   compactPanelSvg,
   spotifySvg,
+  withoutVinylTexture,
 } from './fixtures.js';
 
 const USER = 'WikdSolvemProbler';
@@ -524,8 +525,8 @@ describe('the compact card', () => {
     for (const url of ['https://evil.example/c.png', '#grid', 'data:image/svg+xml;base64,PHN2Zz48L3N2Zz4=', 'data:text/html,x', '']) {
       upstream({ spotify: () => ok(spotifySvg({ cover: url, logo: url })) });
       const svg = await expectCompactCard(await get(COMPACT));
-      assert.doesNotMatch(svg, /<image[^>]*href="(?!data:image\/png;base64,)/, url);
-      assert.doesNotMatch(svg, /<image /, url);
+      assert.doesNotMatch(withoutVinylTexture(svg), /<image[^>]*href="(?!data:image\/png;base64,)/, url);
+      assert.doesNotMatch(withoutVinylTexture(svg), /<image /, url);
       assert.ok(svg.includes('class="relay-vinyl-record"'), url);
       assert.ok(svg.includes('>Mura Masa</text>'), url);
     }
@@ -653,7 +654,7 @@ describe('Apple Music', () => {
     assert.match(svg, new RegExp(`fill="${PALETTE.dark.muted}">Bleu Nuit</text>`));
     assert.ok(svg.includes(`href="data:image/jpeg;base64,${RASTERS.jpeg}"`));
     assert.ok(svg.includes('fill="url(#vignetteRight)"'));
-    assert.doesNotMatch(svg, /foreignObject|upstream|image\/webp|song-title|Nothing playing|Spotify/i);
+    assert.doesNotMatch(withoutVinylTexture(svg), /foreignObject|upstream|image\/webp|song-title|Nothing playing|Spotify/i);
   });
 
   it('draws the compact card strip from it', async () => {
@@ -662,7 +663,7 @@ describe('Apple Music', () => {
     assert.ok(svg.includes(LABEL));
     assert.match(svg, /lengthAdjust="spacing" filter="url\(#relay-glow-playing\)">Last played on Apple Music<\/text>/);
     assert.ok(svg.includes(`href="data:image/jpeg;base64,${RASTERS.jpeg}"`));
-    assert.doesNotMatch(svg, /upstream|image\/webp|Nothing playing|Spotify/i);
+    assert.doesNotMatch(withoutVinylTexture(svg), /upstream|image\/webp|Nothing playing|Spotify/i);
   });
 
   it('escapes a hostile song and artist and keeps them as text', async () => {
@@ -683,9 +684,9 @@ describe('Apple Music', () => {
     for (const cover of ['https://evil.example/c.jpg', 'data:image/svg+xml;base64,PHN2Zz48L3N2Zz4=', 'data:image/png;base64,AAAA']) {
       upstream({ cards: appleCards, apple: () => ok(appleSvg({ cover })) });
       const svg = await expectCard(await get(`user=${USER}&mode=light`));
-      assert.ok(svg.includes(`<circle cx="50" cy="50" r="28" fill="${PALETTE.light.line}"/>`), cover);
+      assert.ok(svg.includes(`<circle cx="50" cy="50" r="27" fill="${PALETTE.light.line}"/>`), cover);
       assert.ok(svg.includes('class="relay-vinyl-record"'), cover);
-      assert.doesNotMatch(svg, /<image|data:image\/svg/, cover);
+      assert.doesNotMatch(withoutVinylTexture(svg), /<image|data:image\/svg/, cover);
     }
   });
 
