@@ -79,8 +79,9 @@ def git(repo, *args, when=T0, author=ME, committer=None, check_exit=True):
                GIT_COMMITTER_EMAIL=committer[1], GIT_AUTHOR_DATE="%d +0000" % when,
                GIT_COMMITTER_DATE="%d +0000" % when)
     p = subprocess.run(["git", "-C", repo, "-c", "core.autocrlf=false", "-c", "commit.gpgsign=false",
+                        "-c", "gc.auto=0", "-c", "maintenance.auto=false",
                         "-c", "advice.detachedHead=false", "-c", "merge.conflictStyle=merge"] + list(args),
-                       env=env, capture_output=True)
+                       env=env, capture_output=True, timeout=60)
     if p.returncode and check_exit:
         raise SystemExit("git %s failed: %s" % (args[:2], p.stderr.decode("utf-8", "replace")))
     return p.stdout.decode("utf-8", "replace")
@@ -91,7 +92,7 @@ def new_repo(name, branch="main"):
     if os.path.isdir(path):
         remove(path)
     os.makedirs(path)
-    subprocess.run(["git", "init", "-q", "-b", branch, path], check=True, capture_output=True)
+    subprocess.run(["git", "init", "-q", "-b", branch, path], check=True, capture_output=True, timeout=60)
     SOURCES[name] = path
     return path
 
@@ -146,10 +147,28 @@ def guards(n):
     return "".join("    if x is None:\n        return None\n" for _ in range(n))
 
 
+def clone_fixture(source, dest, bare=True):
+    # Exercise Git's regular object transfer, as production's HTTPS clone does,
+    # instead of the local hardlink/copy optimization. No automatic maintenance
+    # should race a synthetic repository while the fixture is read.
+    args = ["git", "-c", "gc.auto=0", "-c", "maintenance.auto=false", "clone", "-q", "--no-local"]
+    if bare:
+        args.append("--bare")
+    try:
+        result = subprocess.run(args + [source, dest], capture_output=True, timeout=120)
+    except subprocess.TimeoutExpired:
+        raise AssertionError("fixture clone exceeded 120 seconds") from None
+    if result.returncode:
+        # collect intentionally swallows RuntimeError for unread real histories.
+        # A synthetic clone failure must instead fail the check with its stderr.
+        raise AssertionError("fixture clone exited %d: %s" %
+                             (result.returncode, result.stderr.decode("utf-8", "replace")[:300]))
+
+
 def fake_clone(owner, name, dest):
     if os.path.isdir(dest):
         remove(dest)
-    subprocess.run(["git", "clone", "-q", "--bare", SOURCES[name], dest], check=True, capture_output=True)
+    clone_fixture(SOURCES[name], dest)
 
 
 cp.clone = fake_clone
@@ -607,7 +626,7 @@ fk1 = commit(a, "write", T0)
 write(a, "core.py", body("fkcore", 10) + body("fkmore", 5))
 fk2 = commit(a, "more", T0 + DAY)
 b = os.path.join(ROOT, "src", "fork_repo")
-subprocess.run(["git", "clone", "-q", a, b], check=True, capture_output=True)
+clone_fixture(a, b, bare=False)
 SOURCES["fork_repo"] = b
 write(b, "extra.py", body("fkextra", 7))
 fk3 = commit(b, "fork's own", T0 + 2 * DAY)
@@ -690,8 +709,13 @@ with open(probe, "w", encoding="utf-8") as f:
             "spec = importlib.util.spec_from_file_location('cp', sys.argv[1])\n"
             "cp = importlib.util.module_from_spec(spec)\n"
             "spec.loader.exec_module(cp)\n"
-            "cp.clone = lambda o, n, d: subprocess.run(['git', 'clone', '-q', '--bare', sys.argv[2], d], check=True,\n"
-            "                                          capture_output=True)\n"
+            "def clone(o, n, d):\n"
+            "    p = subprocess.run(['git', '-c', 'gc.auto=0', '-c', 'maintenance.auto=false', 'clone', '-q',\n"
+            "                        '--bare', '--no-local', sys.argv[2], d], capture_output=True, timeout=120)\n"
+            "    if p.returncode:\n"
+            "        raise AssertionError('fixture clone exited %%d: %%s' %%\n"
+            "                             (p.returncode, p.stderr.decode('utf-8', 'replace')[:300]))\n"
+            "cp.clone = clone\n"
             "cp.resolve_authors = lambda o, s: {}\n"
             "cp.owner_identity = lambda o: {'user': True, 'id': 123, 'name': 'Owner One'}\n"
             "cp.templates = lambda o: {}\n"
@@ -703,7 +727,10 @@ with open(probe, "w", encoding="utf-8") as f:
 outs = set()
 for seed in ("1", "2", "3"):
     p = subprocess.run([sys.executable, probe, CP_PATH, r], capture_output=True,
-                       env=dict(os.environ, PYTHONHASHSEED=seed, PYTHONDONTWRITEBYTECODE="1"))
+                       env=dict(os.environ, PYTHONHASHSEED=seed, PYTHONDONTWRITEBYTECODE="1"), timeout=180)
+    if p.returncode:
+        raise AssertionError("hash-seed fixture exited %d: %s" %
+                             (p.returncode, p.stderr.decode("utf-8", "replace")[-300:]))
     outs.add(p.stdout.decode().strip().splitlines()[-1] if p.stdout.strip() else p.stderr.decode()[-200:])
 check("SPEC", "the same history gives the same figures under three string hash seeds: %s" % sorted(outs),
       len(outs) == 1, outs)
