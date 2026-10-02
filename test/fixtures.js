@@ -1,5 +1,14 @@
 // Small stand-ins for the upstream documents, shaped like the real ones.
 import { readFileSync } from 'node:fs';
+import { VINYL_TEXTURE } from '../lib/vinyl-texture.js';
+
+// Ignore only the exact first-party texture when checking that hostile provider images were refused.
+export function withoutVinylTexture(svg) {
+  return svg.replace(/<image\b[^>]*data-vinyl-texture="true"[^>]*\/>/g, (image) => {
+    if (!image.includes(`href="${VINYL_TEXTURE}"`)) throw new Error('Unexpected record texture');
+    return '';
+  });
+}
 
 // A 1x1 PNG, standing in for the widget's logo and cover art.
 export const PIXEL =

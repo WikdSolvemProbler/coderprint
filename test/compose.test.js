@@ -38,6 +38,7 @@ import {
   coderprintJson,
   compactPanelSvg,
   spotifySvg,
+  withoutVinylTexture,
 } from './fixtures.js';
 
 const RULES_DARK =
@@ -703,7 +704,7 @@ describe('buildCompactCard', () => {
       ),
     );
     assert.ok(card.endsWith('</svg></svg>'));
-    assert.ok(card.includes(`<image x="22" y="22" width="56" height="56" preserveAspectRatio="xMidYMid slice" clip-path="url(#relay-vinyl-label)" href="${PIXEL}"/>`));
+    assert.ok(card.includes(`<image x="23" y="23" width="54" height="54" preserveAspectRatio="xMidYMid slice" clip-path="url(#relay-vinyl-label)" href="${PIXEL}"/>`));
     assert.ok(card.includes('<svg x="14" y="14" width="84" height="84" viewBox="0 0 100 100"'));
     assert.ok(card.includes('font-size="12" font-weight="700" fill="#53b14f" textLength="89.1" lengthAdjust="spacing">Now playing on</text>'));
     assert.ok(card.includes(`<image x="206.1" y="14" width="16" height="16" preserveAspectRatio="xMidYMid meet" href="${PIXEL}"/>`));
@@ -744,9 +745,9 @@ describe('buildCompactCard', () => {
   it('draws an empty record label for a cover that is not a data: raster, and no logo', () => {
     for (const url of ['#grid', 'https://evil.example/c.png']) {
       const card = compactCard(spotifySvg({ cover: url, logo: url }), PALETTE.light);
-      assert.ok(card.includes(`<circle cx="50" cy="50" r="28" fill="${PALETTE.light.line}"/>`), url);
+      assert.ok(card.includes(`<circle cx="50" cy="50" r="27" fill="${PALETTE.light.line}"/>`), url);
       assert.ok(card.includes('class="relay-vinyl-record"') && !card.includes(`href="${url}"`), url);
-      assert.doesNotMatch(card, /<image/, url);
+      assert.doesNotMatch(withoutVinylTexture(card), /<image/, url);
       assert.ok(card.includes('>Mura Masa</text>'), url);
     }
   });
@@ -853,7 +854,7 @@ describe('buildCompactCard', () => {
     assert.ok(compactCard().includes('<clipPath id="relay-card">'));
     const extra = `<g id="relay-card"/><g id="&#114;elay1-cover"/><g id='relay3-x'/><g xml:id="relay2x"/>`;
     const card = compactCard(spotifySvg(), PALETTE.dark, compactPanelSvg({ extra }));
-    for (const name of ['card', 'vinyl-label', 'vinyl-disc', 'vinyl-sheen', 'glow-playing', 'glow-artist', 'glow-bars', 'vignette']) {
+    for (const name of ['card', 'vinyl-label', 'vinyl-disc', 'glow-playing', 'glow-artist', 'glow-bars', 'vignette']) {
       assert.ok(card.includes(`id="relay2-${name}"`), name);
       assert.ok(card.includes(`url(#relay2-${name})`), name);
     }
@@ -968,11 +969,11 @@ describe('the Apple Music card', () => {
     assert.match(svg, new RegExp(`<text x="160" y="101" text-anchor="middle" [^>]*font-size="16" fill="${muted}">Bleu Nuit</text>`));
     assert.ok(
       svg.includes(
-        '<image x="22" y="22" width="56" height="56" preserveAspectRatio="xMidYMid slice" clip-path="url(#relay-vinyl-label)" ' +
+        '<image x="23" y="23" width="54" height="54" preserveAspectRatio="xMidYMid slice" clip-path="url(#relay-vinyl-label)" ' +
           `href="data:image/jpeg;base64,${RASTERS.jpeg}"/>`,
       ),
     );
-    assert.doesNotMatch(svg, /foreignObject|<div|<h1|<h2|<p[ >]|upstream|song-title|song-artist|cover-image|image\/webp|Spotify|Nothing playing/i);
+    assert.doesNotMatch(withoutVinylTexture(svg), /foreignObject|<div|<h1|<h2|<p[ >]|upstream|song-title|song-artist|cover-image|image\/webp|Spotify|Nothing playing/i);
   });
 
   it('bounces a full-width equalizer on the cover, only for a viewer who allows motion', () => {
@@ -1009,7 +1010,7 @@ describe('the Apple Music card', () => {
   it('keeps its ids clear of the panel', () => {
     const panel = PANEL_SVG.replace('<circle', '<g id="relay-cover"/><g id="&#114;elay1-glow-bars"/><circle');
     const svg = card(appleSvg(), PALETTE.dark, panel);
-    for (const name of ['vinyl-label', 'vinyl-disc', 'vinyl-sheen', 'glow-playing', 'glow-artist', 'glow-bars']) {
+    for (const name of ['vinyl-label', 'vinyl-disc', 'glow-playing', 'glow-artist', 'glow-bars']) {
       assert.ok(svg.includes(`id="relay2-${name}"`) && svg.includes(`url(#relay2-${name})`), name);
     }
     assert.ok(svg.includes('class="relay2-bar"') && svg.includes('@keyframes relay2-bounce'));
@@ -1049,9 +1050,9 @@ describe('the Apple Music card', () => {
   it('draws an empty record label for a cover that is not a base64 raster', () => {
     for (const cover of ['https://evil.example/c.jpg', 'data:image/png;base64,AAAA', `data:image/webp,${RASTERS.jpeg}`]) {
       const svg = card(appleSvg({ cover }), PALETTE.light);
-      assert.ok(svg.includes(`<circle cx="50" cy="50" r="28" fill="${PALETTE.light.line}"/>`), cover);
+      assert.ok(svg.includes(`<circle cx="50" cy="50" r="27" fill="${PALETTE.light.line}"/>`), cover);
       assert.ok(svg.includes('<svg x="10" y="131" width="300" height="300" viewBox="0 0 100 100"'));
-      assert.doesNotMatch(svg, /<image|evil/, cover);
+      assert.doesNotMatch(withoutVinylTexture(svg), /<image|evil/, cover);
       assert.ok(svg.includes('>Bleu Nuit</text>'), cover);
     }
   });
@@ -1079,9 +1080,9 @@ describe('the compact Apple Music card', () => {
     assert.match(svg, new RegExp(`font-size="17" font-weight="700" fill="${text}">Hélène &amp; Les Ondes</text>`));
     assert.match(svg, new RegExp(`font-size="14" fill="${muted}">Bleu Nuit</text>`));
     assert.ok(svg.includes(`clip-path="url(#relay-vinyl-label)" href="data:image/jpeg;base64,${RASTERS.jpeg}"/>`));
-    assert.equal(svg.split('<image ').length - 1, 1, 'the cover, and no logo');
+    assert.equal(withoutVinylTexture(svg).split('<image ').length - 1, 1, 'the cover, and no logo');
     assert.equal(svg.split('class="relay-bar"').length - 1, 47);
-    assert.doesNotMatch(svg, /foreignObject|<div|upstream|image\/webp|Spotify|Nothing playing/i);
+    assert.doesNotMatch(withoutVinylTexture(svg), /foreignObject|<div|upstream|image\/webp|Spotify|Nothing playing/i);
   });
 
   it('glows in dark mode as the Spotify strip does', () => {
@@ -1102,9 +1103,9 @@ describe('the compact Apple Music card', () => {
   it('draws an empty record label for a cover that is not a base64 raster', () => {
     for (const cover of ['https://evil.example/c.jpg', 'data:image/png;base64,AAAA', `data:image/webp,${RASTERS.jpeg}`]) {
       const svg = compactApple(appleSvg({ cover }), PALETTE.light);
-      assert.ok(svg.includes(`<circle cx="50" cy="50" r="28" fill="${PALETTE.light.line}"/>`), cover);
+      assert.ok(svg.includes(`<circle cx="50" cy="50" r="27" fill="${PALETTE.light.line}"/>`), cover);
       assert.ok(svg.includes('<svg x="14" y="14" width="84" height="84" viewBox="0 0 100 100"'));
-      assert.doesNotMatch(svg, /<image|evil/, cover);
+      assert.doesNotMatch(withoutVinylTexture(svg), /<image|evil/, cover);
     }
   });
 });
