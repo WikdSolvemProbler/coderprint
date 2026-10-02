@@ -41,6 +41,8 @@ import {
   withoutVinylTexture,
 } from './fixtures.js';
 
+const LIGHT_GLOW = /<filter\b[^>]*\bid="[^"]*glow[^"]*"|filter="url\(#[^)]*glow[^)]*\)"|<feGaussianBlur\b|vignette/i;
+
 const RULES_DARK =
   '.container{background:transparent!important}' +
   `.artist{color:${PALETTE.dark.text}!important}.song{color:${PALETTE.dark.muted}!important}` +
@@ -715,7 +717,8 @@ describe('buildCompactCard', () => {
     );
     assert.equal(bars.length, 47);
     assert.equal(compactCard(spotifySvg(), PALETTE.light), card, 'the same song draws the same equalizer');
-    assert.doesNotMatch(card, /<div|foreignObject|<style>\s*div|filter|vignette|Nothing playing/);
+    assert.doesNotMatch(withoutVinylTexture(card), /<div|foreignObject|<style>\s*div|Nothing playing/);
+    assert.doesNotMatch(withoutVinylTexture(card), LIGHT_GLOW);
   });
 
   it('escapes what the widget says and rejects malformed artwork with encoded quotes', () => {
@@ -847,7 +850,7 @@ describe('buildCompactCard', () => {
       ),
     );
     assert.ok(dark.endsWith('<rect y="662" width="360" height="112" fill="url(#relay-vignette)" clip-path="url(#relay-card)"/></svg>'));
-    assert.doesNotMatch(light, /<filter|filter=|vignette/);
+    assert.doesNotMatch(withoutVinylTexture(light), LIGHT_GLOW);
   });
 
   it('keeps its own ids clear of every id in the panel', () => {
@@ -1004,7 +1007,7 @@ describe('the Apple Music card', () => {
     }
     assert.match(dark, /<text [^>]*font-size="16" fill="[^"]*">Bleu Nuit<\/text>/, 'the song does not glow');
     assert.ok(dark.endsWith(`<rect x="560" width="336" height="445" rx="10" fill="url(#vignetteRight)"/></svg>`));
-    assert.doesNotMatch(card(appleSvg(), PALETTE.light), /<filter|filter=|vignette/);
+    assert.doesNotMatch(withoutVinylTexture(card(appleSvg(), PALETTE.light)), LIGHT_GLOW);
   });
 
   it('keeps its ids clear of the panel', () => {

@@ -45,10 +45,26 @@ function withoutMotion(css) {
 
 describe('the shared native vinyl artwork', () => {
   it('embeds the exact committed WebP texture without an additional image request', () => {
-    const bytes = readFileSync(new URL('../assets/vinyl/record-ridges.webp', import.meta.url));
+    const bytes = readFileSync(new URL('../assets/vinyl/record-material.webp', import.meta.url));
     assert.equal(bytes.subarray(0, 4).toString(), 'RIFF');
     assert.equal(bytes.subarray(8, 12).toString(), 'WEBP');
     assert.equal(VINYL_TEXTURE, `data:image/webp;base64,${bytes.toString('base64')}`);
+  });
+
+  it('rotates the groove material and label as one disc, with independent light responding to the same ridges', () => {
+    for (const service of Object.keys(providers)) {
+      for (const layout of ['wide', 'compact']) {
+        const vinyl = record(render(service, layout));
+        const body = vinyl.match(/<g class="relay-vinyl-record" data-vinyl-body="true">([\s\S]*?)<\/g>/)?.[1];
+        assert.ok(body, 'there is one rotating physical record');
+        assert.ok(body.includes('id="relay-vinyl-texture"') && body.includes(`href="${VINYL_TEXTURE}"`), 'the groove material rotates');
+        assert.ok(body.includes(`href="${PIXEL}"`), 'the label shares the material rotation');
+        assert.doesNotMatch(body, /vinyl-glint/, 'studio lighting does not orbit with the record');
+        assert.match(vinyl, /<mask id="relay-vinyl-ridges"[^>]*>[\s\S]*?<g class="relay-vinyl-record"><use href="#relay-vinyl-texture"\/><\/g>[\s\S]*?<\/mask>/);
+        assert.match(vinyl, /<g mask="url\(#relay-vinyl-ridges\)" clip-path="url\(#relay-vinyl-grooves\)"[^>]*><g class="relay-vinyl-glint">/);
+        assert.equal((vinyl.match(/data-vinyl-texture="true"/g) ?? []).length, 1, 'lighting reuses the material without a second image');
+      }
+    }
   });
 
   it('draws the same grooved record and circular album label for both providers in both slots', () => {
