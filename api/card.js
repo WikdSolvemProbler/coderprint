@@ -3,8 +3,8 @@
 // Without layout the card is the wide one, 896 by 445. layout=compact asks for the portrait card for
 // phones, 360 wide, built from the profile's panel-compact-<mode>.svg; a profile without a usable one
 // gets the wide card instead, so it still shows something before it has drawn its compact panel. The
-// music half is Spotify's widget or, when cards.json names an Apple Music uid instead, a card the relay
-// draws itself from the track Apple Music's card names.
+// music half is drawn natively from Spotify or Apple Music's track data, with the same vinyl artwork
+// for either service. Upstream widget markup is not included in that music pane.
 //
 // A Vercel Function on the Node.js runtime, written as the fetch Web Standard export, per
 // https://vercel.com/docs/functions/functions-api-reference#fetch-web-standard

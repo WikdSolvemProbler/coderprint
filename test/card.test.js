@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { afterEach, beforeEach, describe, it } from 'node:test';
 
 import handler from '../api/card.js';
-import { BAR_RULES, DEFAULT_PALETTES, GLOW_RULES, appleUrl, spotifyUrl, svgInner } from '../lib/compose.js';
+import { DEFAULT_PALETTES, appleUrl, spotifyUrl, svgInner } from '../lib/compose.js';
 import {
   APPLE_UID,
   COMPACT_PANEL_SVG,
@@ -244,20 +244,20 @@ describe('input', () => {
 });
 
 describe('the card', () => {
-  it('merges the panel and the recolored live Spotify card', async () => {
+  it('merges the panel and a native live Spotify pane', async () => {
     const svg = await expectCard(await get(`user=${USER}&mode=dark`));
     assert.ok(svg.includes(`<rect width="896" height="445" rx="10" fill="${PALETTE.dark.bg}"/>`));
     assert.ok(svg.includes(`stroke="${PALETTE.dark.line}"`));
-    assert.ok(svg.includes(`.artist{color:${PALETTE.dark.text}!important}.song{color:${PALETTE.dark.muted}!important}${BAR_RULES}${GLOW_RULES}</style>`));
+    assert.match(svg, new RegExp(`font-size="20" font-weight="700" fill="${PALETTE.dark.text}" filter="url\\(#relay-glow-artist\\)">Mura Masa</text>`));
     assert.ok(svg.includes('fill="url(#vignetteRight)"'));
-    assert.ok(svg.includes('<div class="artist">Mura Masa</div>'));
-    assert.doesNotMatch(svg, /Nothing playing/);
+    assert.ok(svg.includes('class="relay-vinyl-record"'));
+    assert.doesNotMatch(svg, /Nothing playing|foreignObject|<div/);
   });
 
   it('glows only in dark mode', async () => {
     const svg = await expectCard(await get(`user=${USER}&mode=light`));
-    assert.ok(svg.includes(`${BAR_RULES}</style>`));
-    assert.ok(!svg.includes(GLOW_RULES) && !svg.includes('vignetteRight'));
+    assert.ok(svg.includes('class="relay-vinyl-record"'));
+    assert.doesNotMatch(svg, /<filter|filter=|vignette/);
   });
 
   it('fetches from the HEAD ref and the widget, refusing redirects, each under a deadline', async () => {
@@ -306,7 +306,7 @@ describe('the card', () => {
     upstream({ spotify: () => ok(spotifySvg({ extra: refresh })) });
     const wide = await expectCard(await get(`user=${USER}&mode=dark`));
     assert.doesNotMatch(wide, /<meta|http-equiv|refresh/i);
-    assert.ok(wide.includes('<div class="artist">Mura Masa</div>'));
+    assert.match(wide, /filter="url\(#relay-glow-artist\)">Mura Masa<\/text>/);
     const compact = await expectCompactCard(await get(COMPACT));
     assert.doesNotMatch(compact, /<meta|http-equiv|refresh/i);
     const htmlRefresh = refresh.replace('<meta ', '<h:meta xmlns:h="http://www.w3.org/1999/xhtml" ');
@@ -319,8 +319,8 @@ describe('the card', () => {
   it('bounces the equalizer of a recently played track in the wide and the compact card', async () => {
     upstream({ spotify: () => ok(RECENT_SVG) });
     const wide = await expectCard(await get(`user=${USER}&mode=dark`));
-    assert.equal(wide.split('<div class="bar"></div>').length - 1, 75);
-    assert.match(wide, /<div class="playing">Recently played on </);
+    assert.equal(wide.split('class="relay-bar"').length - 1, 60);
+    assert.match(wide, />Recently played on<\/text>/);
     const compact = await expectCompactCard(await get(COMPACT));
     assert.match(compact, />Recently played on<\/text>/);
     assert.ok(compact.includes('animation:relay-bounce 425ms linear infinite alternate'));
@@ -351,8 +351,8 @@ describe('the card', () => {
     const extra = '<script>alert(2)</script><img src="https://evil.example/t.png" onerror="alert(3)"/>';
     upstream({ spotify: () => ok(spotifySvg({ song, extra })) });
     const svg = await expectCard(await get(`user=${USER}&mode=dark`));
-    assert.ok(svg.includes(`<div class="song">${song}</div>`));
-    assert.doesNotMatch(svg, /Nothing playing|alert\(2\)/);
+    assert.ok(svg.includes(`>${song}</text>`));
+    assert.doesNotMatch(svg, /Nothing playing|alert\(2\)|<script|foreignObject/i);
   });
 
   it('shows the placeholder when the Spotify card is unusable', async () => {
@@ -525,7 +525,8 @@ describe('the compact card', () => {
       upstream({ spotify: () => ok(spotifySvg({ cover: url, logo: url })) });
       const svg = await expectCompactCard(await get(COMPACT));
       assert.doesNotMatch(svg, /<image[^>]*href="(?!data:image\/png;base64,)/, url);
-      assert.ok(!svg.includes('clip-path="url(#relay-cover)"'), url);
+      assert.doesNotMatch(svg, /<image /, url);
+      assert.ok(svg.includes('class="relay-vinyl-record"'), url);
       assert.ok(svg.includes('>Mura Masa</text>'), url);
     }
   });
@@ -568,7 +569,7 @@ describe('the compact card', () => {
       const svg = await expectCard(await get(COMPACT));
       const hrefs = calls.map((call) => call.href);
       assert.ok(hrefs.indexOf(`${RAW}panel-compact-dark.svg`) < hrefs.indexOf(`${RAW}panel-dark.svg`), label);
-      assert.ok(svg.includes(`.artist{color:${PALETTE.dark.text}!important}`), label);
+      assert.match(svg, new RegExp(`fill="${PALETTE.dark.text}" filter="url\\(#relay-glow-artist\\)">Mura Masa</text>`), label);
     }
     assert.ok(big.meter.served < 3 * MB, `pulled ${big.meter.served} bytes`);
   });
@@ -615,7 +616,7 @@ describe('the compact card', () => {
     try {
       upstream({ compact: () => ok(compactPanelSvg({ extra: '<g id="THROWS-WHEN-READ"/>' })) });
       const svg = await expectCard(await get(COMPACT));
-      assert.ok(svg.includes(`.artist{color:${PALETTE.dark.text}!important}`));
+      assert.match(svg, new RegExp(`fill="${PALETTE.dark.text}" filter="url\\(#relay-glow-artist\\)">Mura Masa</text>`));
       assert.ok(calls.some((call) => call.href === `${RAW}panel-dark.svg`));
     } finally {
       String.prototype.trimEnd = trimEnd;
@@ -678,11 +679,12 @@ describe('Apple Music', () => {
     }
   });
 
-  it('draws a tile, never an outside image, for a cover that is not a base64 raster', async () => {
+  it('draws an empty record label, never an outside image, for a cover that is not a base64 raster', async () => {
     for (const cover of ['https://evil.example/c.jpg', 'data:image/svg+xml;base64,PHN2Zz48L3N2Zz4=', 'data:image/png;base64,AAAA']) {
       upstream({ cards: appleCards, apple: () => ok(appleSvg({ cover })) });
       const svg = await expectCard(await get(`user=${USER}&mode=light`));
-      assert.ok(svg.includes(`<rect x="10" y="131" width="300" height="300" rx="5" fill="${PALETTE.light.line}"/>`), cover);
+      assert.ok(svg.includes(`<circle cx="50" cy="50" r="28" fill="${PALETTE.light.line}"/>`), cover);
+      assert.ok(svg.includes('class="relay-vinyl-record"'), cover);
       assert.doesNotMatch(svg, /<image|data:image\/svg/, cover);
     }
   });
@@ -717,7 +719,7 @@ describe('Apple Music', () => {
     }
     upstream({ cards: () => ok(cardsJson({ apple_music: { uid: APPLE_UID } })) });
     const svg = await expectCard(await get(`user=${USER}&mode=dark`));
-    assert.ok(svg.includes('<div class="artist">Mura Masa</div>'));
+    assert.match(svg, /filter="url\(#relay-glow-artist\)">Mura Masa<\/text>/);
     assert.ok(calls.every((call) => !call.href.startsWith(APPLE)));
   });
 
