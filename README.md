@@ -1,35 +1,58 @@
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="design/welcome-nite.svg">
+    <source media="(prefers-color-scheme: light)" srcset="design/welcome-lite.svg">
+    <img width="520" alt="Welcome to coderprint" src="design/welcome-lite.svg">
+  </picture>
+</p>
+
+<p align="center">
+  <a href="#tour-of-coderprint">Tour</a>&nbsp;&nbsp;·&nbsp;&nbsp;<a href="#install">Install</a>&nbsp;&nbsp;·&nbsp;&nbsp;<a href="#options">Options</a>&nbsp;&nbsp;·&nbsp;&nbsp;<a href="#your-contributions-in-organizations">Organizations</a>&nbsp;&nbsp;·&nbsp;&nbsp;<a href="#for-machines">For machines</a>&nbsp;&nbsp;·&nbsp;&nbsp;<a href="#privacy">Privacy</a>&nbsp;&nbsp;·&nbsp;&nbsp;<a href="#license">License</a>
+</p>
+
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/WikdSolvemProbler/WikdSolvemProbler/HEAD/assets/panel-dark.svg">
   <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/WikdSolvemProbler/WikdSolvemProbler/HEAD/assets/panel-light.svg">
   <img width="100%" alt="A coderprint panel: lines of code written and still in use, commit activity and the language mix over time" src="https://raw.githubusercontent.com/WikdSolvemProbler/WikdSolvemProbler/HEAD/assets/panel-dark.svg">
 </picture>
 
-# coderprint
-
 > **In development.** Code is licensed under the [PolyForm Noncommercial License 1.0.0](LICENSE.md). The [design license](design/LICENSE.md) applies separately.
 
-Your code's fingerprint on your GitHub profile: how much you actually wrote, how often, and in what, across your own repositories and optionally your contributions in organizations, private ones included. It runs as a GitHub Action inside your own profile repository, so nothing outside GitHub ever reads your code.
+## Tour of coderprint
 
-## What it shows
+coderprint puts your code's fingerprint on your GitHub profile. A GitHub Action in your own profile repository reads every branch of every repository you own, private ones included, plus your contributions in organizations if you choose, and draws one animated panel: how many lines of code you wrote, how many are still in use, how often you commit, and which languages you write in, over time. Your code never leaves GitHub.
 
-- **Lines of code**, as four figures: how many of the lines you wrote in the window you pick are still **in use**, split into **prod** (production code) and **tests**, beside everything **written**. A ring and a bar show the same split as shares of what you wrote, production drawn bright and tests dimmer, and the ring's middle says what share you kept. For visitors who allow motion they tell it as a story, slowly enough to follow: both fill to everything written and glow red with its figure, fall back to what is in use and glow yellow, fall to production and glow green, then fill back in with tests, green again, the ring's middle giving each step's share.
-- **Activity** under them: 52 bars split the chart's span, each slice's lines of code rising in green and its commits hanging below in red, each scaled to its own peak, and the biggest bursts of work carry their own totals. The bars start on the day your real work did and end on the day the card was drawn, so a card that has stopped refreshing shows its date.
-- **Commits** on every branch, **active days** and your **longest** and **current streak** (days with a commit, counted in your own time zone when your profile shows one, see below), and how many **languages** each hold 1% or more of your lines of code, which the row calls `languages · 1%+`. One green dot at a time hops along these rows, and each number lights as the dot reaches it.
-- **The language mix over time.** Days before today run along a log scale, so last week gets room and last year still fits. Quiet stretches are veiled by how little evidence they rest on, and the mix eases across them instead of jumping. The stream flows into a column that is also the legend: your eight biggest languages by name, the rest as Other.
-- **A red Pareto line** over the stream: the running share of every line in the chart, from 0% at its left edge to 100% today. It draws itself, fast where you wrote fast and slow across quiet time.
-- **Five themes** (Paper, Sepia, Sage, Oxblood and Ink), each drawn twice: a light version for visitors in light mode and a dark one, near-black and softly glowing, for dark mode. Everyone sees the same theme on a given day, and the five take turns daily, unless you pin one with the `theme` input.
-- **What you're playing on Spotify, or the track you last played on Apple Music**, optionally, merged into the same card in its colors. With the relay, the album artwork sits in the center of a spinning vinyl record for either service, on desktops and phones.
-- **A layout for phones.** On a screen 540 CSS pixels wide or less, your README shows a compact panel instead: the same numbers, bars, chart, legend and motion, 360 wide and stacked, so nothing that must be read shrinks to a few pixels. With the relay (step 4 below) it comes merged over a strip showing your music; with a music card beside the panel and no relay, phones get the two side by side, as on a desktop.
+### What you'll see
 
-Motion only ever adds to a finished panel. A visitor whose device asks for reduced motion sees none of it, and a viewer that never starts animations still sees the whole panel. Screen readers get the numbers and the bars' dates in words, and the image's alt text in your README gets the numbers.
+- **Four numbers.** Lines of code **written**, how many are still **in use**, and that in-use figure split into **prod** and **tests**. A ring and a bar show the same split, and the ring's middle shows the share you kept.
+- **Activity.** 52 bars from the day your real work started to today, lines rising in green and commits hanging below in red, with the biggest bursts labelled.
+- **Streaks.** Commits on every branch, active days, your longest and current streak, and how many languages hold at least 1% of your code.
+- **Your language mix over time**, on a log scale so last week gets room and last year still fits. A red Pareto line draws itself over it, showing when your code got written.
+- **Five themes** (Paper, Sepia, Sage, Oxblood and Ink), each with a light and a dark version, rotating daily unless you pin one.
+- **Music, if you want it.** What you're playing on Spotify, or your last Apple Music track, spinning on a vinyl record in the panel's colors.
+- **A phone layout** that stacks everything at 360 pixels wide instead of shrinking it.
 
-## How it counts
+Motion only ever adds to a finished panel. Visitors who prefer reduced motion see a still one, and screen readers get every number in words.
+
+### How it counts
+
+Most stat cards add up what `git log` says. coderprint tries to count only the code you actually wrote.
+
+- **It reads code the way the language does.** Blank lines and comments don't count. Python goes through Python's own tokenizer, and C-family strings and nested comments are followed properly.
+- **It counts each change once.** Copies, moves, merges, cherry-picks, rebases and squash merges add nothing new. A block you only re-indented or moved stays the same lines.
+- **It ignores noise.** Bots, formatter sweeps, vendored and generated files, lockfiles, and imported codebases are all left out.
+- **"In use" is traced, not guessed.** Every line at the head of each default branch is followed back through history to the commit that added it, so a line you wrote and someone else reformatted is still yours.
+- **It only counts you.** Commits from another GitHub account's address never count, and neither do machine names like "root" or "Your Name".
+- **It respects your privacy.** It uses a short-lived read-only token, rounds every time to the day so nobody can see when you work, and only uses a time zone your profile already shows.
+- **Machines can read it too.** Everything on the card is also written to `assets/coderprint.json`, built from the same values as the image.
+
+<details>
+<summary><strong>The full counting rules</strong></summary>
 
 coderprint reads every branch of every repository your account owns, forks left out; the `gh-pages` branch is read only when it is the default, and a tag on it does not bring it back in. It counts lines of code only. A blank line is not code, and neither is a line that is only a comment, recognized by each language's own comment syntax; a line of code with a comment after it is code, and so is every line of a string, whatever it holds. A Python docstring, or any string standing alone as a statement, is a comment. Each file is read whole, as its language reads it: Python by Python's own tokenizer, the C family and most other languages with their strings and character literals followed, so a comment opened after code on a line is seen and a comment nested in another is nested where the language nests them. A line added to a file reads as the whole new file reads it, so a line added inside a comment or a string opened further up counts, or not, exactly as it will at the head. A few languages whose strings cannot be followed line by line (shell scripts, Perl, Ruby, MATLAB and some others) are read by their comment syntax at the start of each line only, so there a comment opened after code on its line counts as code. Prose and data are never code: Markdown, TeX, YAML, TOML, plain text, the prose around the code of a literate source, notebooks (Jupyter's and Mathematica's), any file whose name or extension no language claims, and one whose extension several languages share and comment differently (`.pl`). A header (`.h`) is C, C++ or Objective-C, which all comment alike, and `.m`, `.fs` and `.v` are each shared by languages that comment compatibly, so their lines count, drawn as Other. `assets/coderprint.json` says how many lines of each figure rest on a fallback reading, such as a Python file its tokenizer cannot read.
 
 **Written** is every line of code added in a new file version, and each file version counts once, the first time its exact content appears in any of your repositories or branches. Exact copies, moves, merges, branch landings and imports from one repository to another reuse content that already exists, so they add nothing, and a file moved to a new name while being edited adds only the lines it changed, even where git itself does not pair the two names (a move of more files than its rename limit, or a `.js` file rewritten as `.ts`). A block of three or more lines moved within one commit, inside its file or into another, adds nothing either (its text is compared spacing aside, so a block only re-indented is moved too), and a squash merge, or a rebase that reset its author dates, of a branch still kept adds only what the branch did not already write; no commit says it is a squash, so one is known by its lines, nearly all of them waiting on a kept branch. A copy, or a deleted file brought back, that changes even one line is a new file version, and every line of code it adds counts. A file version first committed under a name that does not count, such as a `.txt` file or one in `build/` or `vendor/`, never counts, even once it is renamed to one that does; committed under both at once, it counts. A rewrite of a line does count again; deleting a line takes nothing off what you wrote.
 
-These counts have limits. A rebased copy of a branch that is still kept can count some work twice when too little of the original change remains for coderprint to recognize it. If a repository's line diffs cannot be read, coderprint falls back to Git's added-line totals for that repository, which can include comments and blanks; those lines add nothing to **in use**, and the data file and run log say this happened. For some languages whose strings cannot be followed reliably, the line reader uses the documented start-of-line comment rule above.
 
 **In use** is read at the head of each repository's default branch: the lines of code standing there that you wrote in the window, where wrote means exactly the lines counted as written. Each written line counts in use at most once across all your repositories, so in use can never exceed written, and a file copied into a second repository, or a fork, is in use once. Every line is traced through its history: each file version is the version before it with its diff applied, so a line keeps the commit that added it, and it is yours when that commit's line was counted as written in the window. A line you wrote and later deleted is not in use; a line someone else wrote is not yours, even in your repository and however common its text, and neither is a line you wrote before the window; a line your formatter re-indented, a sweep renamed or a commit moved is still yours, whoever made the sweep or the move, since each hands the line it changes on to the line it leaves in its place, and so is a line a merge brought in from your branch. A line whose history cannot say, such as one only a merge's conflict resolution wrote, is matched by its text instead, spacing aside, against the written lines no traced line took; `assets/coderprint.json` says how many lines were traced and how many were matched by text. An archived repository's head is not in use, though its history still counts as written. A line is **test** code when its file sits in a tests folder (`tests`, `__tests__`, `spec`, `e2e` and the like) or is named as a test (`test_x.py`, `x_test.go`, `x.test.ts`, `XTest.java`), or in Rust, when it sits in a `#[cfg(test)]` module; every other line in use is **production**. A repository whose history cannot be read line by line counts its added lines whole, comments and blank lines included, adds nothing in use, is counted in `assets/coderprint.json`, and is warned of in the run's log; one whose default branch cannot be read at its head still counts the lines of code it wrote, adds nothing in use, and is counted there separately. An empty repository, or one holding only tags, has nothing in it to count.
 
@@ -49,6 +72,17 @@ A file's language comes from its name or extension. The chart names at most eigh
 Every time is moved to the start of its day before anything is drawn, so nothing on the card tells what time of day you work. A repository that cannot be read, even on a second try, is left out and counted in `assets/coderprint.json`; if more than one, and more than a tenth of them, cannot be read, the previous panels are kept. A repository made from another account's template is left out and counted the same way when GitHub cannot list that template's files, and so is your relay copy when coderprint's own cannot be listed, since your code there could not be told from what came with it. When GitHub cannot be asked, even on a second try, whose an address is or which repositories were made from a template, the previous panels are kept, since the run could not tell your code from anyone else's. The run keeps time back from its limit for asking, so one that reads until its limit leaves out only the repositories it had no time for.
 
 Days are your own, if and only if your public profile already says where you are. coderprint reads two things any visitor can see: the local time GitHub shows on your profile, if you turned that on, and your profile's location, looked up in a table of cities built from [GeoNames](https://www.geonames.org). The time zone always wins; the location can only choose among the zones with that offset today, which decides daylight saving for past days. A location that could mean places in different zones, such as "Santa Clara" (California or Cuba), "USA" or "SF / NYC", is not guessed at: days then fall at your shown offset, fixed for every past day so its daylight saving is ignored, or with no time zone shown, in UTC. Nothing else is asked for, and the zone is never printed or written anywhere.
+
+</details>
+
+<details>
+<summary><strong>What it can get wrong</strong></summary>
+
+- A rebased copy of a kept branch can count twice if too little of the original change is left to recognize.
+- If a repository's line diffs can't be read, it falls back to Git's added-line totals, which include comments and blanks. Those lines add nothing in use, and the run log and `coderprint.json` say so.
+- Languages that only get the start-of-line comment rule count a comment opened after code as code.
+
+</details>
 
 ## For machines
 
@@ -139,7 +173,8 @@ This feature is in development on `main`; the published v1.2.1 tag predates thes
 
 Set `organizations` to the organization logins to scan. Leave `organization-only` unset to combine these contributions with your personally owned repositories, or set it to `true` to show only your contributions in those organizations. Forks remain excluded. Files and commits shared by several repositories still count once.
 
-### Manual organization updates without an App
+<details>
+<summary><strong>Manual organization updates without an App</strong></summary>
 
 Use one blended card with fresh personal history and the latest saved organization history. Run the organization scan locally with your existing `gh` sign-in; no App installation or organization token in the daily workflow is needed. Your local sign-in must already have read access to those repositories. The daily Action reads an authenticated encrypted snapshot from a **private personally owned snapshot repository**, then feeds both histories through the same collector. Shared commits, file versions and in-use lines are deduplicated across both scopes. The snapshot store itself is excluded from your contributions.
 
@@ -172,7 +207,10 @@ organization-snapshot-key: ${{ secrets.CODERPRINT_ORGANIZATION_SNAPSHOT_KEY }}
 
 The card remains one blended view. Its data file records the organization snapshot's UTC capture date. Organization changes after that scan enter the next manual refresh. A missing key, unreadable private store, invalid snapshot, identity mismatch or rollback keeps the existing card. If you specifically want an organization-only card instead, `tools/refresh-organizations.py` remains available.
 
-### Automatic organization updates
+</details>
+
+<details>
+<summary><strong>Automatic organization updates</strong></summary>
 
 For organization scanning inside the daily Action, each organization needs a separate read-only token in `organization-tokens`. To use an App, create a private GitHub App owned by the organization, with only **Contents: Read-only** and **Metadata: Read-only**, and install it on **Only select repositories**. Store that App's Client ID as `CODERPRINT_ORG_APP_CLIENT_ID` and its private key as `CODERPRINT_ORG_APP_KEY` in your personal profile repository. Alternatively, a public App can have separate installations on your account and the organization; a private personal App cannot be installed on an organization. [GitHub's App visibility documentation](https://docs.github.com/en/apps/creating-github-apps/registering-a-github-app/making-a-github-app-public-or-private) explains this account boundary.
 
@@ -201,6 +239,8 @@ authored-imports: ${{ secrets.CODERPRINT_AUTHORED_IMPORTS }} # optional
 Use token outputs or secrets for the JSON map; never put credentials in workflow text. Each GitHub request and clone uses the corresponding installation token. A missing organization token or an unreadable organization repository stops the refresh and preserves the existing panels. Locally, without token environment variables, your existing `gh` sign-in can read organizations it already has access to.
 
 If you upload your own existing project in one large commit, the 500-file import heuristic would normally exclude its lines. Set `authored-imports` to exact `owner/repository@full-commit-hash` pairs, separated by commas or spaces, for uploads you declare to be your own work. Use a secret for private repository names. This exception applies only to the bulk-import heuristic: commits attributed to others, automation, generated or vendored files, template content and duplicate file versions remain excluded. The data file reports how many declared upload commits were credited and their counted lines, without repository names or hashes. This is an owner declaration, not independently verified proof of authorship before the upload.
+
+</details>
 
 ## Options
 
