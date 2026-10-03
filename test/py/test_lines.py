@@ -436,8 +436,11 @@ d = collect([{"t.py": "if 1:\n\tx = 1\n        y = 2\n", "ok.py": "z = 1\n"}], d
 check("data", "collect: lines read by the fallback are counted as approximate, written and in use",
       lambda: sum(n for _, n in d["code"]["approximate"]) == 3 and d["code"]["approximate_in_use"] == 3,
       d if isinstance(d, str) else d["code"])
-check("data", "the data file's written and in use figures carry approximate_loc",
-      "approximate_loc=" in open(sys.argv[1], encoding="utf-8").read())
+# the source is coderprint.py and, from the release that split it, the parts it runs from generator/
+parts = os.path.join(os.path.dirname(os.path.abspath(sys.argv[1])), "generator")
+source = "".join(open(path, encoding="utf-8").read() for path in [sys.argv[1]] + sorted(
+    os.path.join(parts, f) for f in (os.listdir(parts) if os.path.isdir(parts) else ()) if f.endswith(".py")))
+check("data", "the data file's written and in use figures carry approximate_loc", "approximate_loc=" in source)
 
 # ---------------------------------------------------------------- reading cost stays near a single pass
 body = "".join('def f%d(x):\n    """Doc %d."""\n    return x + %d\n\n' % (i, i, i) for i in range(400))

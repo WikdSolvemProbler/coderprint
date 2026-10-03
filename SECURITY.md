@@ -2,7 +2,7 @@
 
 coderprint has two parts, and a vulnerability can live in either:
 
-- **The Action** (`action.yml` and `coderprint.py`) runs in a user's own profile repository with a token that can read every repository they own, private ones included, and commits the panel back.
+- **The Action** (`action.yml`, `coderprint.py` and the `generator` folder it runs) runs in a user's own profile repository with a token that can read every repository they own, private ones included, and commits the panel back.
 - **The relay** (`api/card.js` and `lib/compose.js`) is a function a user deploys to Vercel. It fetches the panel from the user's profile repository and a music card from a third-party service, sanitizes both, and serves the merged image to anyone who views that profile.
 
 This policy says which versions get fixes, how to report a problem privately, what happens after you do, and what counts as a vulnerability here. It was written 26SEP2026.
@@ -111,7 +111,7 @@ A vulnerability is a way to break one of these promises. Each is kept in the cod
 
 **The Action**
 
-- It never prints or writes a repository name, a file path, a commit message or an email address. Action logs on a public repository are public, so a leak of any of these, above all the name of a private repository, is a vulnerability. The panels and `assets/coderprint.json` hold totals only, and only by whole days, so they never tell what time of day anyone worked; `coderprint.json` is public output built from the same totals the panels draw, and names no repository. A failed command reports only the program's name, never its arguments (`run` in `coderprint.py`).
+- It never prints or writes a repository name, a file path, a commit message or an email address. Action logs on a public repository are public, so a leak of any of these, above all the name of a private repository, is a vulnerability. The panels and `assets/coderprint.json` hold totals only, and only by whole days, so they never tell what time of day anyone worked; `coderprint.json` is public output built from the same totals the panels draw, and names no repository. A failed command reports only the program's name, never its arguments (`run` in `generator/commands.py`).
 - The token never appears on a command line. `git` receives it through an environment-only header (`git_auth`), and the README's setup gives it a GitHub App token limited to reading contents and metadata that expires within the hour.
 - Organization scanning is opt-in. A personal card's identity stays personal, and organization commits require a linked owner identity, the owner's noreply address or an explicitly listed, non-conflicting address. Name matching and the sole-author fallback apply only to personally owned repositories. An exact `authored-imports` declaration can override the bulk-upload heuristic, but never those attribution or file exclusions; its public provenance is labeled as an owner declaration.
 - In Actions, each organization uses its own read token. Git headers are scoped to the selected repository URL; inherited environment authentication headers are removed, and unrelated installation tokens are not passed to child processes. External template repositories outside the configured accounts are fetched anonymously. A configured organization that cannot be read preserves existing panels rather than publishing a partial refresh.

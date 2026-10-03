@@ -8,6 +8,7 @@ generator:
   - changed-files:
       - any-glob-to-any-file:
           - coderprint.py
+          - generator/**
           - action.yml
           - tools/**
           - places.tsv.gz
