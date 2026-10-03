@@ -80,6 +80,10 @@ def mark_outline(data):
     big = max(max(abs(p[0]), abs(p[1])) for p in pts)
     if bw <= 0 or bh <= 0 or min(bw, bh) < 1e-6 * max(big, 1.0):
         raise RuntimeError("the mark has no usable outline")
+    area = sum(abs(sum(ax * qy - qx * ay for (ax, ay), (qx, qy) in zip(poly, poly[1:] + poly[:1])))
+               for poly in polys) / 2
+    if area < 1e-6 * bw * bh:   # every piece flat, though the bounding box is not (a diagonal line)
+        raise RuntimeError("the mark has no usable outline")
     return polys
 
 
