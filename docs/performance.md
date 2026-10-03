@@ -12,7 +12,7 @@ histories, and a small repository of edge cases (paths with spaces, tabs, quotes
 to a name holding " and ", a rename with an edit, a mode change, a deletion, a merge, a symbolic link, invalid UTF-8
 in a line, and a missing newline at end of file).
 
-| Stream | Commits | Size | Python 3.12 | Rust 1.94 | Speedup |
+| Stream | Commits | Size | Python 3.12 | Rust 1.97 | Speedup |
 | --- | ---: | ---: | ---: | ---: | ---: |
 | pallets/click | 3,380 | 19 MB | 0.73 s | 0.11 s | 6.8x |
 | python-poetry/poetry | 3,884 | 38 MB | 1.46 s | 0.21 s | 7.0x |
