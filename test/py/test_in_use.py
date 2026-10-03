@@ -868,7 +868,10 @@ check("C4-07", "written's method says what stands where diffs could not be read,
 check("SPEC", "the in_use definition says it is traced, what falls back to text, and never exceeds written",
       "Traced" in defs["in_use"]["method"] and "matched_by_text_loc" in defs["in_use"]["method"]
       and "never exceeds written" in defs["in_use"]["means"], defs["in_use"])
-source = open(CP_PATH, encoding="utf-8").read()
+# the source is coderprint.py and, from the release that split it, the parts it runs from generator/
+parts = os.path.join(os.path.dirname(CP_PATH), "generator")
+source = "".join(open(path, encoding="utf-8").read() for path in [CP_PATH] + sorted(
+    os.path.join(parts, f) for f in (os.listdir(parts) if os.path.isdir(parts) else ()) if f.endswith(".py")))
 check("M35", "the repository listing asks whether each repository is archived", "isArchived" in source)
 
 remove(ROOT)

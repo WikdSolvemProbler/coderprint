@@ -19,12 +19,12 @@ A sentence or two per answer is enough. The questions exist so that the maintain
 
 ## A good challenge, worked through
 
-coderprint skips any commit that adds more than 500 new files of code, treating it as an existing codebase brought in rather than code written (`IMPORT_FILES` in `coderprint.py`). Suppose you think 500 is wrong. "500 is too high" is an opinion and will be closed. A pull request that challenges it well reads like this:
+coderprint skips any commit that adds more than 500 new files of code, treating it as an existing codebase brought in rather than code written (`IMPORT_FILES` in `generator/settings.py`). Suppose you think 500 is wrong. "500 is too high" is an opinion and will be closed. A pull request that challenges it well reads like this:
 
 - **Who:** profile owners who scaffold projects with generators that write several hundred files in one commit.
 - **What:** those scaffolds count as written code, so the panel's new lines total is inflated.
 - **When:** on every run whose window includes such a commit.
-- **Where:** `IMPORT_FILES` in `coderprint.py`, and the "How it counts" section of the README.
+- **Where:** `IMPORT_FILES` in `generator/settings.py`, and the "How it counts" section of the README.
 - **Why:** the panel claims to count code a person wrote; a generated scaffold is not that.
 - **How:** lower the threshold to the value the measurement below supports, and state the new value in the README.
 - **Evidence:** a script added in the pull request, linked at its commit (for example `https://github.com/YOUR-NAME/coderprint/blob/YOUR-COMMIT/tools/count_new_files.py`), that counts new files per commit across a stated list of public repositories, with its output table; and what the generators themselves document writing, such as Django's `startproject` (https://docs.djangoproject.com/en/stable/ref/django-admin/#startproject) and Vite's project templates (https://vite.dev/guide/). The pull request says which figure sets the new threshold and why.
@@ -104,7 +104,7 @@ timeout -k 10s 1800s python test/py/run.py
 
 The runner gives each Python test script a five-minute deadline and exits with an error when one fails or times out. The full run has a 30-minute deadline in CI. The commands above use Linux's `timeout`; on Windows, launch them through the installed process guard with the same outer deadlines.
 
-The generator, `coderprint.py`, needs Python 3 and only its standard library, plus the `gh` command signed in to GitHub, and `git`. Without a time zone database (Python older than 3.9, or Windows without the `tzdata` package) it counts days in Coordinated Universal Time (UTC) or at the profile's fixed offset. Without the `design` folder it draws in a plain grey look. It reads its settings from environment variables (`CARDS_OWNER`, `CARDS_WINDOW`, `CARDS_THEME` and the others `action.yml` passes); `GH_TOKEN` is optional locally, since without it `gh`'s own sign-in answers. It writes into the folder it runs in: the panel files under `assets/`, and a block in `README.md`. Run a live check from a scratch copy of a profile repository, never from this one. The synthetic checks cover the generator's main paths without GitHub; for a change that needs live verification, say in your pull request exactly what you ran and what you compared. Do not imply that a second account was checked unless it was.
+The generator, `coderprint.py` and the parts it runs from `generator/` (`PARTS` lists them in order, each named for the work it does), needs Python 3 and only its standard library, plus the `gh` command signed in to GitHub, and `git`. Without a time zone database (Python older than 3.9, or Windows without the `tzdata` package) it counts days in Coordinated Universal Time (UTC) or at the profile's fixed offset. Without the `design` folder it draws in a plain grey look. It reads its settings from environment variables (`CARDS_OWNER`, `CARDS_WINDOW`, `CARDS_THEME` and the others `action.yml` passes); `GH_TOKEN` is optional locally, since without it `gh`'s own sign-in answers. It writes into the folder it runs in: the panel files under `assets/`, and a block in `README.md`. Run a live check from a scratch copy of a profile repository, never from this one. The synthetic checks cover the generator's main paths without GitHub; for a change that needs live verification, say in your pull request exactly what you ran and what you compared. Do not imply that a second account was checked unless it was.
 
 ## Conventions
 
