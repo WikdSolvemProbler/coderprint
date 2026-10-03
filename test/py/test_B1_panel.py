@@ -360,7 +360,11 @@ def label():
     cp = load()
     name = getattr(cp, "LANGUAGES_ROW", None)
     check("LABEL the row's name is one constant, 'languages · 1%+' by default", name == "languages · 1%+", name)
-    source = open(SRC, encoding="utf-8").read()
+    # the source is coderprint.py and, from the release that split it, the parts it runs from generator/
+    parts = os.path.join(os.path.dirname(SRC), "generator")
+    paths = [SRC] + sorted(os.path.join(parts, f) for f in (os.listdir(parts) if os.path.isdir(parts) else ())
+                           if f.endswith(".py"))
+    source = "".join(open(path, encoding="utf-8").read() for path in paths)
     check("LABEL the name is written once in the source, and 'languages written' nowhere",
           source.count('"languages · 1%+"') == 1 and "languages written" not in source,
           (source.count('"languages · 1%+"'), source.count("languages written")))
