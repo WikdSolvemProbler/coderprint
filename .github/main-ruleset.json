@@ -25,10 +25,7 @@
       "type": "code_scanning",
       "parameters": {
         "code_scanning_tools": [
-          { "tool": "CodeQL", "security_alerts_threshold": "all", "alerts_threshold": "all" },
-          { "tool": "Bandit", "security_alerts_threshold": "all", "alerts_threshold": "all" },
-          { "tool": "ESLint", "security_alerts_threshold": "all", "alerts_threshold": "all" },
-          { "tool": "BinSkim", "security_alerts_threshold": "all", "alerts_threshold": "all" }
+          { "tool": "CodeQL", "security_alerts_threshold": "all", "alerts_threshold": "all" }
         ]
       }
     }
