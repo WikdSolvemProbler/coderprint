@@ -2,7 +2,7 @@ Required Notice: Copyright 2026 Peter Shiller (https://github.com/WikdSolvemProb
 
 # coderprint Design License
 
-The design is everything in this folder: the themes (`themes.json`), the chart's colors (`palette.json`) and the coderprint wordmark (`wordmark.svg`). It is not covered by the code license in [../LICENSE.md](../LICENSE.md). The licensor is Peter Shiller.
+The design is everything in this folder: the themes (`themes.json`), the chart's colors (`palette.json`), the coderprint wordmark (`wordmark.svg`) and the README's banner made from it (`welcome-lite.svg` and `welcome-nite.svg`). It is not covered by the code license in [../LICENSE.md](../LICENSE.md). The licensor is Peter Shiller.
 
 ## What you may do
 
