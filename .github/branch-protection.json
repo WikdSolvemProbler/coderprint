@@ -6,13 +6,9 @@
       { "context": "fuzz", "app_id": 15368 },
       { "context": "actionlint", "app_id": 15368 },
       { "context": "zizmor", "app_id": 15368 },
-      { "context": "gitleaks", "app_id": 15368 },
       { "context": "Analyze (actions)", "app_id": 15368 },
       { "context": "Analyze (javascript-typescript)", "app_id": 15368 },
       { "context": "Analyze (python)", "app_id": 15368 },
-      { "context": "OSSAR-Scan", "app_id": 15368 },
-      { "context": "pull-request", "app_id": 15368 },
-      { "context": "dependency-review", "app_id": 15368 },
       { "context": "description answers the five Ws", "app_id": 15368 }
     ]
   },
