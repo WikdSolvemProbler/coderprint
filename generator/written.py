@@ -25,6 +25,13 @@ def lfs_pointer(lines):
             and re.fullmatch(rb"sha256:[0-9a-f]{64}", keys.get(b"oid", b"")) is not None)
 
 
+def gained_line_end(hunk):
+    """Whether a hunk's only change to the old last line is the line end it gains: git lists that line as removed
+    ("\\ No newline at end of file") and again as added, though nobody wrote or removed it."""
+    gone, came, gone_eof = hunk[4], hunk[5], hunk[6]
+    return bool(gone_eof and gone and came and came[0].rstrip(b"\r") == gone[-1].rstrip(b"\r"))
+
+
 GIT_VERSION = []
 
 
@@ -364,7 +371,7 @@ def read_added_code(repo_dir):
         came_at, other_at, kept_at, gone_at, bounds = [], [], [], [], array("l")
         for h, (a, b, c, d) in zip(f["hunks"], edits or ()):
             first, came, gone = c, [], []
-            if h[6] and h[4] and h[5] and h[5][0].rstrip(b"\r") == h[4][-1].rstrip(b"\r"):
+            if gained_line_end(h):
                 first, b = c + 1, b - 1   # the old last line only gained its line end: not removed, not written
                 kept_at.append((c, b))
             for i in range(first, d if not new_pointer else first):
@@ -389,10 +396,17 @@ def read_added_code(repo_dir):
                 pairs.append(([" ".join(t.split()) for t in gone], [" ".join(t.split()) for t in came]))
         if edits is None:   # the new version read whole, as fetched: its added lines are the hunks' own
             gone_at = None   # and what it removed cannot be placed in a version before
-            for old_start, old_count, new_start, new_count, gone_lines, _, _, _ in f["hunks"]:
+            for h in f["hunks"]:
+                old_start, old_count, new_start, new_count, gone_lines = h[:5]
                 came, gone = [], []
                 c = new_start - 1 if new_count else new_start
-                for i in range(c, min(c + new_count, n) if not new_pointer else c):
+                end = min(c + new_count, n)
+                if gained_line_end(h):   # as with edits above: neither removed nor written
+                    gone_lines = gone_lines[:-1]
+                    if c < end:
+                        kept_at.append((c, None))   # no version before is had, so its origin stays unknown
+                    c += 1
+                for i in range(c, end if not new_pointer else c):
                     if kinds[i] == CODE:
                         came.append(get(i))
                         rough += not exact
@@ -434,7 +448,10 @@ def read_added_code(repo_dir):
         plus, minus, rough, head = array("q"), array("q"), 0, False
         lang = language_of(f["new_path"])
         pointer = [all(LFS_LINE.fullmatch(line) for h in f["hunks"] for line in h[k]) for k in (4, 5)]
-        for old_start, old_count, new_start, new_count, gone, came, _, _ in f["hunks"]:
+        for h in f["hunks"]:
+            old_start, old_count, new_start, new_count, gone, came = h[:6]
+            if gained_line_end(h):   # the old last line only gained its line end: neither removed nor written
+                gone, came, new_start = gone[:-1], came[1:], new_start + 1
             texts = ([], [])   # removed, added
             for lines, start, side, rd in ((came, new_start, 1, reader), (gone, old_start, 0, old_reader)):
                 rd = rd.fallback or rd
