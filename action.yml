@@ -24,6 +24,9 @@ inputs:
   authored-imports:
     description: Exact owner/repository@full-commit-hash uploads you declare as your existing authored work. Overrides the bulk-import heuristic for those commits after author and file exclusions. Optional; use a secret for private repository names.
     default: ""
+  exclude-repositories:
+    description: Repositories to leave out, separated by commas or spaces, each a name you own or an organization's owner/repository. Optional; use a secret for private repository names.
+    default: ""
   organization-snapshot:
     description: Path to an authenticated encrypted organization history snapshot downloaded from your private personal snapshot store. Optional; organizations are refreshed locally.
     default: ""
@@ -76,6 +79,7 @@ runs:
         CARDS_ORGANIZATION_ONLY: ${{ inputs.organization-only }}
         CARDS_ORGANIZATION_TOKENS: ${{ inputs.organization-tokens }}
         CARDS_AUTHORED_IMPORTS: ${{ inputs.authored-imports }}
+        CARDS_EXCLUDE_REPOSITORIES: ${{ inputs.exclude-repositories }}
         CARDS_ORGANIZATION_SNAPSHOT: ${{ inputs.organization-snapshot }}
         CARDS_ORGANIZATION_SNAPSHOT_KEY: ${{ inputs.organization-snapshot-key }}
         CARDS_SNAPSHOT_STORE: ${{ inputs.snapshot-store }}
@@ -98,7 +102,7 @@ runs:
           trap 'rm -rf -- "$deps"' EXIT
           timeout -k 10 120 env -u GH_TOKEN -u GITHUB_TOKEN -u GH_ENTERPRISE_TOKEN -u GITHUB_ENTERPRISE_TOKEN \
             -u CARDS_ORGANIZATION_TOKENS -u CARDS_ORGANIZATION_SNAPSHOT_KEY -u CARDS_SNAPSHOT_STORE \
-            -u CARDS_ORGANIZATION_SNAPSHOT -u CARDS_AUTHORED_IMPORTS -u CARDS_AUTHOR_EMAILS \
+            -u CARDS_ORGANIZATION_SNAPSHOT -u CARDS_AUTHORED_IMPORTS -u CARDS_AUTHOR_EMAILS -u CARDS_EXCLUDE_REPOSITORIES \
             python3 -m pip install --disable-pip-version-check --only-binary=:all: --require-hashes \
             --target "$deps" -r "$GITHUB_ACTION_PATH/requirements-snapshot.txt"
           export PYTHONPATH="$deps${PYTHONPATH:+:$PYTHONPATH}"
