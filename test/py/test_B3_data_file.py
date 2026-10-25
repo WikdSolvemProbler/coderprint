@@ -585,6 +585,22 @@ def _():
     names = [r["name"] for r in lister.list_repositories("someorg")]
     check("blind-25 list_repositories leaves out only the repository named after the account", names == [".github",
                                                                                                         "tool"], names)
+    os.environ["CARDS_EXCLUDE_REPOSITORIES"] = "TOOL, other/tool"
+    try:
+        names = [r["name"] for r in lister.list_repositories("someorg")]
+        kept = [r["name"] for r in lister.list_repositories("someorg", exclude=False)]
+        os.environ["CARDS_EXCLUDE_REPOSITORIES"] = "a/b/c"
+        try:
+            lister.list_repositories("someorg")
+            bad = None
+        except RuntimeError as error:
+            bad = str(error)
+    finally:
+        del os.environ["CARDS_EXCLUDE_REPOSITORIES"]
+    check("exclude-repositories leaves out a named repository, without case, and only for its own owner",
+          names == [".github"] and kept == [".github", "tool"], (names, kept))
+    check("exclude-repositories refuses an entry that is not a repository name", bad is not None
+          and "exclude-repositories" in bad, bad)
 
 
 # ------------------------------------------------------------------ F4: only coderprint's own cards.json

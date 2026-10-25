@@ -137,7 +137,11 @@ def build(cp, owner, orgs, cache, bundles, uploads):
     identity = cp.owner_identity(owner)
     if not identity or not identity["user"] or not identity["id"]:
         raise RuntimeError("the personal GitHub identity could not be verified")
-    repos = cp.list_repositories(owner)
+    repos, excluded = cp.list_repositories(owner, exclude=False), cp.excluded_repositories(owner)
+    # A name that matches nothing is a typo, and would silently keep the repository it meant.
+    if excluded - {(r["owner"].lower(), r["name"].lower()) for r in repos}:
+        raise RuntimeError("each excluded repository must be one of the configured organizations' repositories")
+    repos = [r for r in repos if (r["owner"].lower(), r["name"].lower()) not in excluded]
     templates, authors, seeds, saved, paths = {}, {}, {}, [], {}
     for org in orgs:
         templates[org] = cp.templates(org, owner)
@@ -224,6 +228,7 @@ def run(args):
             (temp / "profile/assets").mkdir(parents=True)
             values = {"CARDS_OWNER": owner, "CARDS_ORGANIZATIONS": " ".join(orgs),
                       "CARDS_ORGANIZATION_ONLY": "true",
+                      "CARDS_EXCLUDE_REPOSITORIES": " ".join(args.exclude or []),
                       "CARDS_TIME_LIMIT": str(args.time_limit)}
             with environment(values):
                 cp.DEADLINE = deadline
@@ -281,6 +286,8 @@ def main():
     p.add_argument("--organizations", required=True, nargs="+")
     p.add_argument("--owner")
     p.add_argument("--authored-imports-file")
+    p.add_argument("--exclude", nargs="+", metavar="OWNER/REPOSITORY",
+                   help="organization repositories to leave out of the snapshot")
     p.add_argument("--relay")
     p.add_argument("--time-limit", type=int, required=True)
     args = p.parse_args()

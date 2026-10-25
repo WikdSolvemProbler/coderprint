@@ -56,6 +56,20 @@ def organization_settings():
     return organizations, tokens
 
 
+def excluded_repositories(owner):
+    """Repositories left out by name: owner/name, or a bare name for one the account owns, compared without case."""
+    entries = [s for s in re.split(r"[\s,;]+", os.environ.get("CARDS_EXCLUDE_REPOSITORIES", "").strip()) if s]
+    if len(entries) > 256:
+        raise RuntimeError("exclude-repositories may list at most 256 repositories")
+    result = set()
+    for entry in entries:
+        match = re.fullmatch(r"(?:([A-Za-z0-9-]{1,39})/)?([A-Za-z0-9._-]{1,100})", entry)
+        if not match or match[2] in (".", ".."):
+            raise RuntimeError("exclude-repositories must list repository names or owner/repository pairs")
+        result.add(((match[1] or owner).lower(), match[2].lower()))
+    return result
+
+
 def repo_owner(owner, repo):
     return repo.get("owner", owner)
 
@@ -99,6 +113,7 @@ def child_env(env=None):
     # A process reading one repository has no reason to receive the other installations' credentials.
     env.pop("CARDS_ORGANIZATION_TOKENS", None)
     env.pop("CARDS_AUTHORED_IMPORTS", None)
+    env.pop("CARDS_EXCLUDE_REPOSITORIES", None)
     env.pop("CARDS_ORGANIZATION_SNAPSHOT_KEY", None)
     if plain:
         env.pop("GH_TOKEN", None)
@@ -146,10 +161,11 @@ def authored_imports(owner):
     return result
 
 
-def list_repositories(owner):
+def list_repositories(owner, exclude=True):
     """Every non-fork repository the account owns, a page of 100 at a time, bar the profile repository, with
     whether it can be read (a disabled or locked repository is counted but never cloned) and whether it is archived
-    (its history is read, its head is not in use)."""
+    (its history is read, its head is not in use). Repositories named in exclude-repositories are left out unless
+    exclude is false."""
     global PROFILE_OWNER
     PROFILE_OWNER = owner
     organizations, _ = organization_settings()
@@ -211,7 +227,8 @@ def list_repositories(owner):
                 seen.add(cursor)
         if not found:
             raise RuntimeError("no repositories are visible in a configured organization; check its read token")
-    return nodes
+    excluded = excluded_repositories(owner) if exclude else set()
+    return [r for r in nodes if (repo_owner(owner, r).lower(), r["name"].lower()) not in excluded]
 
 
 def git_auth(owner, name):

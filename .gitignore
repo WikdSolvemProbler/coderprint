@@ -3,3 +3,4 @@ dev/out-*.svg
 node_modules/
 .vercel/
 dev/
+__pycache__/
