@@ -194,7 +194,7 @@ timeout -k 30 1900 python3 tools/refresh-blended.py \
   --key-file /private/path/coderprint.key --organizations YOUR-ORG --time-limit 1800
 ```
 
-On Windows, use your bounded process launcher with the same finite deadlines and Python arguments. The helper also requires an explicit `--time-limit` for its collection. An optional `--authored-imports-file` reads exact upload declarations from a private local UTF-8 file; that file must remain outside tracked/public files.
+On Windows, use your bounded process launcher with the same finite deadlines and Python arguments. The helper also requires an explicit `--time-limit` for its collection. An optional `--authored-imports-file` reads exact upload declarations from a private local UTF-8 file; that file must remain outside tracked/public files. An optional `--exclude OWNER/REPOSITORY ...` leaves those organization repositories out of the snapshot, and so out of the card; each must name a repository of a listed organization.
 
 The helper stages and verifies the complete organization histories, template evidence and authorship evidence, then prepares `organization.snapshot` in the private store and the usual aggregate panels in your profile. Publish the encrypted store first, then the profile outputs. Only ciphertext belongs in the store; keys, decrypted histories and private upload selectors must never be committed. A failure does not push anything; inspect any local changes before retrying.
 
@@ -254,6 +254,7 @@ If you upload your own existing project in one large commit, the 500-file import
 | `snapshot-store` | none | Private personal repository holding encrypted `organization.snapshot`; downloaded with the personal read token and excluded from contributions. Pass its name from a secret. |
 | `organization-snapshot-key` | none | Base64 decryption key from a secret, required for saved organization history. |
 | `organization-snapshot` | none | An already downloaded encrypted snapshot path, for local or custom workflows. |
+| `exclude-repositories` | none | Repositories to leave out, separated by commas or spaces: a name you own, or an organization's `owner/repository`. Use a secret for private names. |
 | `authored-imports` | none | Exact `owner/repository@full-commit-hash` uploads declared as your existing work. Overrides the bulk-import heuristic after attribution and file exclusions; use a secret for private names. |
 | `window` | `all` | The span everything covers: `all`, `10y`, `5y`, `3y`, `2y` or `12m`. The chart starts at your oldest real work inside it, so it never shows empty time. |
 | `theme` | none | Pins one theme: `paper`, `sepia`, `sage`, `oxblood` or `ink`. Visitors in light mode still get its light version and those in dark mode its dark one. Left out, the five take turns, one a day. |
